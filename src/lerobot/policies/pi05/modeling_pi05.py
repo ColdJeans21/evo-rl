@@ -1250,6 +1250,16 @@ class PI05Policy(PreTrainedPolicy):
                 - "mean": Return scalar mean loss (default, backward compatible)
                 - "none": Return per-sample losses of shape (batch_size,) for RA-BC weighting
         """
+        action_is_pad = None
+        if self.config.mask_action_padding_loss:
+            action_is_pad = batch.get("action_is_pad")
+            if action_is_pad is None:
+                raise ValueError(
+                    "mask_action_padding_loss=True requires action_is_pad in the training batch."
+                )
+            if not isinstance(action_is_pad, Tensor) or action_is_pad.dtype != torch.bool:
+                raise TypeError("action_is_pad must be a boolean tensor (True marks padding).")
+
         # Prepare inputs
         images, img_masks = self._preprocess_images(batch)
         tokens, masks = batch[f"{OBS_LANGUAGE_TOKENS}"], batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
@@ -1262,6 +1272,9 @@ class PI05Policy(PreTrainedPolicy):
         # Truncate losses to actual action dimensions
         original_action_dim = self.config.output_features[ACTION].shape[0]
         losses = losses[:, :, :original_action_dim]
+
+        if action_is_pad is not None:
+            return self._reduce_masked_action_losses(losses, action_is_pad, reduction)
 
         loss_dict = {
             "loss_per_dim": losses.mean(dim=[0, 1]).detach().cpu().numpy().tolist(),
@@ -1277,6 +1290,27 @@ class PI05Policy(PreTrainedPolicy):
             loss = losses.mean()
             loss_dict["loss"] = loss.item()
             return loss, loss_dict
+
+    @staticmethod
+    def _reduce_masked_action_losses(losses: Tensor, action_is_pad: Tensor, reduction: str):
+        if tuple(action_is_pad.shape) != tuple(losses.shape[:2]):
+            raise ValueError("action_is_pad must have shape [batch_size, action_horizon].")
+        valid = ~action_is_pad.to(device=losses.device)
+        valid_steps = valid.sum(dim=1)
+        if torch.any(valid_steps == 0):
+            raise ValueError("Every action chunk must contain at least one non-padding timestep.")
+        # Mask with where: even NaN/Inf in an unused loss slot must not enter the sum.
+        masked = torch.where(valid.unsqueeze(-1), losses, 0.0)
+        if reduction == "none":
+            loss = masked.sum(dim=(1, 2)) / (valid_steps * losses.shape[-1])
+        elif reduction == "mean":
+            loss = masked.sum() / (valid_steps.sum() * losses.shape[-1])
+        else:
+            raise ValueError("reduction must be 'mean' or 'none'.")
+        return loss, {
+            "loss": loss.detach().mean().item(),
+            "loss_per_dim": (masked.sum(dim=(0, 1)) / valid_steps.sum()).detach().cpu().tolist(),
+        }
 
     def _get_default_peft_targets(self) -> dict[str, any]:
         """Return default PEFT target modules for PI0.5 fine-tuning."""

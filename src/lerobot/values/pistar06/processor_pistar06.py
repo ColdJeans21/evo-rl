@@ -218,8 +218,33 @@ def make_pistar06_pre_post_processors(
     if not camera_features:
         camera_features = [k for k in (config.input_features or {}) if k.startswith(OBS_IMAGES)]
 
-    input_steps: list[ProcessorStep] = [
-        RenameObservationsProcessorStep(rename_map={}),
+    input_steps: list[ProcessorStep] = [RenameObservationsProcessorStep(rename_map={})]
+    if config.mode == "vision_language":
+        input_steps.extend(_language_steps(config, dataset_stats))
+    input_steps.extend(
+        [
+            Pistar06PrepareImagesProcessorStep(camera_features=camera_features),
+            DeviceProcessorStep(device=config.device),
+        ]
+    )
+
+    output_steps: list[ProcessorStep] = [DeviceProcessorStep(device="cpu")]
+    return (
+        PolicyProcessorPipeline[dict[str, Any], dict[str, Any]](
+            steps=input_steps,
+            name=POLICY_PREPROCESSOR_DEFAULT_NAME,
+        ),
+        PolicyProcessorPipeline[PolicyAction, PolicyAction](
+            steps=output_steps,
+            name=POLICY_POSTPROCESSOR_DEFAULT_NAME,
+            to_transition=policy_action_to_transition,
+            to_output=transition_to_policy_action,
+        ),
+    )
+
+
+def _language_steps(config: Pistar06Config, dataset_stats) -> list[ProcessorStep]:
+    return [
         NormalizerProcessorStep(
             features={**(config.input_features or {}), **(config.output_features or {})},
             norm_map=config.normalization_mapping,
@@ -241,23 +266,4 @@ def make_pistar06_pre_post_processors(
             padding="max_length",
             truncation=True,
         ),
-        Pistar06PrepareImagesProcessorStep(camera_features=camera_features),
-        DeviceProcessorStep(device=config.device),
     ]
-
-    output_steps: list[ProcessorStep] = [
-        DeviceProcessorStep(device="cpu"),
-    ]
-
-    return (
-        PolicyProcessorPipeline[dict[str, Any], dict[str, Any]](
-            steps=input_steps,
-            name=POLICY_PREPROCESSOR_DEFAULT_NAME,
-        ),
-        PolicyProcessorPipeline[PolicyAction, PolicyAction](
-            steps=output_steps,
-            name=POLICY_POSTPROCESSOR_DEFAULT_NAME,
-            to_transition=policy_action_to_transition,
-            to_output=transition_to_policy_action,
-        ),
-    )

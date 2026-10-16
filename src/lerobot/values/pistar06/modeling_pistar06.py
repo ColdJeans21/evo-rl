@@ -19,20 +19,29 @@ from huggingface_hub.errors import HfHubHTTPError
 from safetensors.torch import save_file
 from torch import Tensor, nn
 
+from lerobot.configs.value_reward import ValueRewardConfig
 from lerobot.policies.pretrained import ActionSelectKwargs, PreTrainedPolicy
 from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS
 from lerobot.utils.import_utils import _transformers_available
 from lerobot.utils.recording_annotations import EPISODE_SUCCESS, resolve_episode_success_label
 from lerobot.values.pistar06.configuration_pistar06 import Pistar06Config
 from lerobot.values.pistar06.processor_pistar06 import PISTAR06_IMAGE_MASK_KEY, PISTAR06_IMAGES_KEY
+from lerobot.values.rewards import build_successful_value_targets
 
 if TYPE_CHECKING or _transformers_available:
-    from transformers import AutoConfig, AutoImageProcessor, AutoModel, AutoModelForCausalLM
+    from transformers import (
+        AutoConfig,
+        AutoImageProcessor,
+        AutoModel,
+        AutoModelForCausalLM,
+        SiglipVisionModel,
+    )
 else:
     AutoConfig = None
     AutoImageProcessor = None
     AutoModel = None
     AutoModelForCausalLM = None
+    SiglipVisionModel = None
 
 
 PISTAR06_SAVE_INFO = "pistar06_save_info.json"
@@ -261,16 +270,20 @@ class Pistar06Model(nn.Module):
         self.cfg = cfg
         self.model_dtype = _resolve_load_dtype(cfg.dtype)
 
-        self.vision_encoder = AutoModel.from_pretrained(
+        # SiglipVisionModel loads only the visual weights; AutoModel on a full
+        # SigLIP repository would also create an unused text encoder under DDP.
+        vision_loader = SiglipVisionModel if cfg.mode == "vision_only" else AutoModel
+        self.vision_encoder = vision_loader.from_pretrained(
             cfg.vision_repo_id,
             revision=cfg.vision_revision,
             torch_dtype=self.model_dtype,
         )
-        self.language_model = _load_language_model(
-            repo_id=cfg.language_repo_id,
-            revision=cfg.language_revision,
-            dtype=self.model_dtype,
-        )
+        if cfg.mode == "vision_language":
+            self.language_model = _load_language_model(
+                repo_id=cfg.language_repo_id,
+                revision=cfg.language_revision,
+                dtype=self.model_dtype,
+            )
 
         image_processor = AutoImageProcessor.from_pretrained(
             cfg.vision_repo_id,
@@ -292,31 +305,35 @@ class Pistar06Model(nn.Module):
         )
 
         vision_feature_size = _extract_vision_feature_size(self.vision_encoder)
-        language_hidden_size = _extract_hidden_size(self.language_model)
 
         self.image_projector = nn.Sequential(
             nn.Linear(vision_feature_size, cfg.fusion_hidden_dim),
             nn.GELU(),
             nn.Dropout(cfg.dropout),
         )
-        self.language_projector = nn.Sequential(
-            nn.Linear(language_hidden_size, cfg.fusion_hidden_dim),
-            nn.GELU(),
-            nn.Dropout(cfg.dropout),
-        )
-        self.final_norm = nn.LayerNorm(cfg.fusion_hidden_dim * 2)
+        head_input_dim = cfg.fusion_hidden_dim
+        if cfg.mode == "vision_language":
+            language_hidden_size = _extract_hidden_size(self.language_model)
+            self.language_projector = nn.Sequential(
+                nn.Linear(language_hidden_size, cfg.fusion_hidden_dim),
+                nn.GELU(),
+                nn.Dropout(cfg.dropout),
+            )
+            head_input_dim *= 2
+        self.final_norm = nn.LayerNorm(head_input_dim)
         self.value_head = nn.Sequential(
-            nn.Linear(cfg.fusion_hidden_dim * 2, cfg.fusion_hidden_dim),
+            nn.Linear(head_input_dim, cfg.fusion_hidden_dim),
             nn.GELU(),
             nn.Dropout(cfg.dropout),
             nn.Linear(cfg.fusion_hidden_dim, cfg.num_bins),
         )
 
         if cfg.use_gradient_checkpointing:
-            _maybe_enable_gradient_checkpointing(self.language_model)
+            if cfg.mode == "vision_language":
+                _maybe_enable_gradient_checkpointing(self.language_model)
             _maybe_enable_gradient_checkpointing(self.vision_encoder)
 
-        if cfg.freeze_language_model:
+        if cfg.mode == "vision_language" and cfg.freeze_language_model:
             _freeze_module(self.language_model)
         if cfg.freeze_vision_encoder:
             _freeze_module(self.vision_encoder)
@@ -358,6 +375,10 @@ class Pistar06Model(nn.Module):
         if image_attention_mask.shape[0] != bsize or image_attention_mask.shape[1] != num_cameras:
             raise ValueError("Batch shape mismatch between images and image_attention_mask.")
 
+        if self.cfg.mode == "vision_only":
+            # Missing cameras must not influence detection of the input pixel range.
+            images = torch.where(image_attention_mask[:, :, None, None, None], images, 0)
+
         if images.dtype == torch.uint8:
             images = images.to(dtype=torch.float32) / 255.0
         else:
@@ -393,36 +414,29 @@ class Pistar06Model(nn.Module):
 
     def forward(
         self,
-        input_ids: Tensor,
-        attention_mask: Tensor,
-        images: Tensor,
-        image_attention_mask: Tensor,
+        input_ids: Tensor | None = None,
+        attention_mask: Tensor | None = None,
+        images: Tensor | None = None,
+        image_attention_mask: Tensor | None = None,
     ) -> Tensor:
-        if input_ids.ndim != 2:
-            raise ValueError(f"'input_ids' must have shape [B, T], got {tuple(input_ids.shape)}.")
-        if attention_mask.ndim != 2:
-            raise ValueError(f"'attention_mask' must have shape [B, T], got {tuple(attention_mask.shape)}.")
-        if images.ndim != 5:
-            raise ValueError(f"'images' must have shape [B, N, C, H, W], got {tuple(images.shape)}.")
-        if image_attention_mask.ndim != 2:
-            raise ValueError(
-                f"'image_attention_mask' must have shape [B, N], got {tuple(image_attention_mask.shape)}."
-            )
-
-        bsize = input_ids.shape[0]
-        if attention_mask.shape[0] != bsize:
-            raise ValueError("Batch size mismatch between input_ids and attention_mask.")
-        if images.shape[0] != bsize or image_attention_mask.shape[0] != bsize:
-            raise ValueError("Batch size mismatch between language and image inputs.")
-        if images.shape[1] == 0:
+        if images is None or images.ndim != 5:
+            raise ValueError("'images' must have shape [B, N, C, H, W].")
+        bsize, num_cameras = images.shape[:2]
+        if num_cameras == 0:
             raise ValueError("At least one camera is required for Pistar06Model.")
-
+        if image_attention_mask is None or tuple(image_attention_mask.shape) != (bsize, num_cameras):
+            raise ValueError("'image_attention_mask' must have shape [B, N].")
         image_attention_mask = image_attention_mask.to(dtype=torch.bool, device=images.device)
         if not torch.all(image_attention_mask.any(dim=1)):
             raise ValueError("Each sample must have at least one valid camera input.")
-        language_mask = attention_mask.to(dtype=torch.bool, device=input_ids.device)
-        if not torch.all(language_mask.any(dim=1)):
-            raise ValueError("Each sample must have at least one valid language token.")
+        if self.cfg.mode == "vision_language":
+            if input_ids is None or attention_mask is None:
+                raise ValueError("vision_language requires input_ids and attention_mask.")
+            if input_ids.ndim != 2 or attention_mask.shape != input_ids.shape or input_ids.shape[0] != bsize:
+                raise ValueError("Language tensors must have matching shape [B, T].")
+            language_mask = attention_mask.to(dtype=torch.bool, device=input_ids.device)
+            if not torch.all(language_mask.any(dim=1)):
+                raise ValueError("Each sample must have at least one valid language token.")
 
         processed_images = self._preprocess_images(images, image_attention_mask)
         num_cameras = processed_images.shape[1]
@@ -433,15 +447,15 @@ class Pistar06Model(nn.Module):
         with image_context:
             image_features = self._encode_images(flat_images)
 
-        language_context = torch.no_grad() if self.cfg.freeze_language_model else nullcontext()
-        with language_context:
-            language_features = self._encode_language(
-                input_ids=input_ids, attention_mask=language_mask.long()
-            )
+        if self.cfg.mode == "vision_language":
+            language_context = torch.no_grad() if self.cfg.freeze_language_model else nullcontext()
+            with language_context:
+                language_features = self._encode_language(
+                    input_ids=input_ids, attention_mask=language_mask.long()
+                )
 
         feature_dtype = torch.float32
         image_features = image_features.to(dtype=feature_dtype)
-        language_features = language_features.to(dtype=feature_dtype)
 
         image_tokens = self.image_projector(image_features).view(bsize, num_cameras, -1)
         camera_token_mask = image_attention_mask.unsqueeze(-1).to(dtype=image_tokens.dtype)
@@ -451,10 +465,11 @@ class Pistar06Model(nn.Module):
             image_attention_mask.sum(dim=1, keepdim=True).to(dtype=image_tokens.dtype).clamp_min(1.0)
         )
         image_pooled = image_tokens.sum(dim=1) / camera_denominator
-        language_token = self.language_projector(language_features)
+        if self.cfg.mode == "vision_only":
+            return self.value_head(self.final_norm(image_pooled))
 
-        joint_features = torch.cat([image_pooled, language_token], dim=-1)
-        return self.value_head(self.final_norm(joint_features))
+        language_token = self.language_projector(language_features.to(dtype=feature_dtype))
+        return self.value_head(self.final_norm(torch.cat([image_pooled, language_token], dim=-1)))
 
 
 class Pistar06Policy(PreTrainedPolicy):
@@ -482,7 +497,7 @@ class Pistar06Policy(PreTrainedPolicy):
         prefixes: list[str] = []
         if self.config.freeze_vision_encoder:
             prefixes.append("model.vision_encoder.")
-        if self.config.freeze_language_model:
+        if self.config.mode == "vision_language" and self.config.freeze_language_model:
             prefixes.append("model.language_model.")
         return prefixes
 
@@ -626,8 +641,8 @@ class Pistar06Policy(PreTrainedPolicy):
         raise RuntimeError("Pistar06Policy is a value model and does not support action selection.")
 
     def predict_value(self, batch: dict[str, Tensor]) -> Tensor:
-        input_ids = batch[OBS_LANGUAGE_TOKENS]
-        attention_mask = batch[OBS_LANGUAGE_ATTENTION_MASK]
+        input_ids = batch.get(OBS_LANGUAGE_TOKENS)
+        attention_mask = batch.get(OBS_LANGUAGE_ATTENTION_MASK)
         images = batch[PISTAR06_IMAGES_KEY]
         image_attention_mask = batch[PISTAR06_IMAGE_MASK_KEY]
 
@@ -640,7 +655,7 @@ class Pistar06Policy(PreTrainedPolicy):
         bin_centers = self.bin_centers.to(device=logits.device)
         return expected_value_from_logits(logits, bin_centers)
 
-    def build_training_raw_batch_hook(self, dataset, targets_cfg):
+    def build_training_raw_batch_hook(self, dataset, targets_cfg, reward_cfg=None):
         raw_frames = dataset.hf_dataset.with_format(None)
         frame_count = len(raw_frames)
         if frame_count == 0:
@@ -650,6 +665,42 @@ class Pistar06Policy(PreTrainedPolicy):
         frame_indices = np.asarray(raw_frames["frame_index"], dtype=np.int64)
         absolute_indices = np.asarray(raw_frames["index"], dtype=np.int64)
 
+        reward = reward_cfg or self.config.reward or ValueRewardConfig()
+        reward.validate()
+        if reward.mode != "legacy":
+            saved_scales = self.config.reward_scales if self.config.reward == reward else None
+            value_targets, scales = build_successful_value_targets(
+                dataset,
+                reward,
+                targets_cfg.success_field,
+                task_scales=saved_scales or None,
+            )
+            self.config.reward = reward
+            self.config.reward_scales = scales
+        else:
+            value_targets = self._legacy_training_targets(
+                dataset, targets_cfg, episode_indices, frame_indices
+            )
+            self.config.reward = reward
+            self.config.reward_scales = {}
+
+        max_index = int(np.max(absolute_indices))
+        value_target_lookup = np.zeros(max_index + 1, dtype=np.float32)
+        value_target_lookup[absolute_indices] = value_targets.astype(np.float32, copy=False)
+        target_key = targets_cfg.target_field
+
+        def value_target_hook(batch: dict[str, Any], step: int) -> dict[str, Any]:
+            del step
+            batch_indices = batch.get("index")
+            if batch_indices is None:
+                raise KeyError("Missing 'index' in batch while building value targets.")
+            batch_indices = torch.as_tensor(batch_indices).detach().cpu().numpy().astype(np.int64).reshape(-1)
+            batch[target_key] = torch.from_numpy(value_target_lookup[batch_indices])
+            return batch
+
+        return value_target_hook
+
+    def _legacy_training_targets(self, dataset, targets_cfg, episode_indices, frame_indices):
         episodes_ds = dataset.meta.episodes.with_format(None)
         episodes = episodes_ds[:]
         n_episodes = len(episodes_ds)
@@ -692,26 +743,7 @@ class Pistar06Policy(PreTrainedPolicy):
             clip_max=self.config.bin_max,
         )
 
-        max_index = int(np.max(absolute_indices))
-        value_target_lookup = np.zeros(max_index + 1, dtype=np.float32)
-        value_target_lookup[absolute_indices] = value_targets.astype(np.float32, copy=False)
-
-        target_key = targets_cfg.target_field
-
-        def value_target_hook(batch: dict[str, Any], step: int) -> dict[str, Any]:
-            del step
-            batch_indices = batch.get("index")
-            if batch_indices is None:
-                raise KeyError("Missing 'index' in batch while building value targets.")
-            if not isinstance(batch_indices, torch.Tensor):
-                batch_indices = torch.as_tensor(batch_indices)
-
-            batch_indices_np = batch_indices.detach().cpu().numpy().astype(np.int64, copy=False).reshape(-1)
-            target_values = torch.from_numpy(value_target_lookup[batch_indices_np]).to(dtype=torch.float32)
-            batch[target_key] = target_values
-            return batch
-
-        return value_target_hook
+        return value_targets
 
     def forward(self, batch: dict[str, Tensor], reduction: str = "mean") -> tuple[Tensor, dict]:
         if self.config.target_key not in batch:
@@ -720,8 +752,8 @@ class Pistar06Policy(PreTrainedPolicy):
                 "Make sure lerobot-value-train target hook is enabled."
             )
 
-        input_ids = batch[OBS_LANGUAGE_TOKENS]
-        attention_mask = batch[OBS_LANGUAGE_ATTENTION_MASK]
+        input_ids = batch.get(OBS_LANGUAGE_TOKENS)
+        attention_mask = batch.get(OBS_LANGUAGE_ATTENTION_MASK)
         images = batch[PISTAR06_IMAGES_KEY]
         image_attention_mask = batch[PISTAR06_IMAGE_MASK_KEY]
 

@@ -9,6 +9,7 @@ from typing import Any
 
 import draccus
 
+from lerobot.configs.value_reward import ValueRewardConfig
 from lerobot.utils.recording_annotations import normalize_episode_success_label
 
 
@@ -118,6 +119,8 @@ class ValueInferencePipelineConfig:
     )
     runtime: ValueInferenceRuntimeConfig = field(default_factory=ValueInferenceRuntimeConfig)
     acp: ValueInferenceACPConfig = field(default_factory=ValueInferenceACPConfig)
+    # None inherits the trained checkpoint; old checkpoints resolve to legacy.
+    reward: ValueRewardConfig | None = None
     viz: ValueInferenceVizConfig = field(default_factory=ValueInferenceVizConfig)
 
     output_dir: Path | None = None
@@ -131,6 +134,8 @@ class ValueInferencePipelineConfig:
         self.inference.validate()
         self.runtime.validate()
         self.acp.validate()
+        if self.reward is not None:
+            self.reward.validate()
         self.viz.validate()
 
         if not self.job_name:

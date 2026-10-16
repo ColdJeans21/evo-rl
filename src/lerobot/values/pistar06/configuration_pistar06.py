@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import NormalizationMode
+from lerobot.configs.value_reward import ValueRewardConfig
 from lerobot.optim.optimizers import AdamWConfig
 from lerobot.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
 from lerobot.utils.constants import OBS_STATE
@@ -12,7 +13,12 @@ from lerobot.utils.constants import OBS_STATE
 @PreTrainedConfig.register_subclass("pistar06")
 @dataclass
 class Pistar06Config(PreTrainedConfig):
-    """Value model config using the Pistar06 stack (SigLIP + Gemma)."""
+    """SigLIP value model with optional Gemma language conditioning."""
+
+    # Old checkpoints without this field retain the language-conditioned path.
+    mode: str = "vision_language"
+    reward: ValueRewardConfig | None = None
+    reward_scales: dict[str, float] = field(default_factory=dict)
 
     # Backbone components
     vision_repo_id: str = "google/siglip-so400m-patch14-384"
@@ -70,9 +76,13 @@ class Pistar06Config(PreTrainedConfig):
     def __post_init__(self) -> None:
         super().__post_init__()
 
+        if self.mode not in {"vision_language", "vision_only"}:
+            raise ValueError("'value.mode' must be vision_language or vision_only.")
+        if self.reward is not None:
+            self.reward.validate()
         if not self.vision_repo_id:
             raise ValueError("'value.vision_repo_id' must be non-empty.")
-        if not self.language_repo_id:
+        if self.mode == "vision_language" and not self.language_repo_id:
             raise ValueError("'value.language_repo_id' must be non-empty.")
         if not self.task_field:
             raise ValueError("'value.task_field' must be non-empty.")

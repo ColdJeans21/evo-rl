@@ -131,7 +131,9 @@ def value_train(
         value_target_raw_batch_hook = value_model.build_training_raw_batch_hook(
             dataset=dataset,
             targets_cfg=cfg.targets,
+            reward_cfg=cfg.reward,
         )
+        cfg.reward = value_model.config.reward
         if is_main_process:
             logging.info("Using value model raw-batch hook for target construction.")
     elif is_main_process:
@@ -163,6 +165,9 @@ def value_train(
                 "norm_map": cfg.value.normalization_mapping,
             },
         }
+        if cfg.value.mode == "vision_only":
+            processor_kwargs["preprocessor_overrides"].pop("normalizer_processor", None)
+            postprocessor_kwargs["postprocessor_overrides"].pop("unnormalizer_processor", None)
 
     preprocessor, postprocessor = make_pre_post_processors(
         policy_cfg=cfg.value,

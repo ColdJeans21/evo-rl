@@ -14,6 +14,7 @@ from huggingface_hub.errors import HfHubHTTPError
 from lerobot.configs import parser
 from lerobot.configs.default import DatasetConfig, PeftConfig, WandBConfig
 from lerobot.configs.policies import PreTrainedConfig
+from lerobot.configs.value_reward import ValueRewardConfig
 from lerobot.optim import OptimizerConfig
 from lerobot.optim.schedulers import LRSchedulerConfig
 from lerobot.utils.hub import HubMixin
@@ -72,6 +73,7 @@ class ValueTrainPipelineConfig(HubMixin):
     optimizer: OptimizerConfig | None = None
     scheduler: LRSchedulerConfig | None = None
 
+    reward: ValueRewardConfig | None = None
     targets: ValueTargetsConfig = field(default_factory=ValueTargetsConfig)
     wandb: WandBConfig = field(default_factory=WandBConfig)
     peft: PeftConfig | None = None
@@ -113,6 +115,8 @@ class ValueTrainPipelineConfig(HubMixin):
             )
 
         self.targets.validate()
+        if self.reward is not None:
+            self.reward.validate()
 
         if hasattr(self.value, "target_key"):
             self.value.target_key = self.targets.target_field

@@ -32,6 +32,7 @@ from tqdm.auto import tqdm
 from lerobot.configs import parser
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.value import ValueInferencePipelineConfig
+from lerobot.configs.value_reward import ValueRewardConfig
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.utils import load_info, write_info
 from lerobot.policies.factory import make_policy, make_pre_post_processors
@@ -52,6 +53,7 @@ from lerobot.values.pistar06.modeling_pistar06 import (
     EpisodeTargetInfo,
     compute_normalized_value_targets,
 )
+from lerobot.values.rewards import build_successful_value_targets
 
 
 class ContiguousDistributedEvalSampler(Sampler[int]):
@@ -522,6 +524,23 @@ def run_value_inference_pipeline(
     episode_indices = np.asarray(raw_frames["episode_index"], dtype=np.int64)
     frame_indices = np.asarray(raw_frames["frame_index"], dtype=np.int64)
 
+    reward = value_cfg.reward or ValueRewardConfig()
+    if cfg.reward is not None and cfg.reward != reward:
+        raise ValueError("Inference reward settings must match the trained checkpoint.")
+    cfg.reward = reward
+    success_targets = None
+    if reward.mode != "legacy":
+        if not value_cfg.reward_scales:
+            raise ValueError(
+                "Checkpoint is missing training reward scales; refusing to fit on inference data."
+            )
+        success_targets, _ = build_successful_value_targets(
+            dataset,
+            reward,
+            cfg.dataset.success_field,
+            task_scales=value_cfg.reward_scales,
+        )
+
     if cfg.acp.intervention_field in raw_frames.column_names:
         interventions = np.asarray(raw_frames[cfg.acp.intervention_field], dtype=np.float32)
     else:
@@ -595,6 +614,8 @@ def run_value_inference_pipeline(
             raise RuntimeError(f"Inference is missing predictions for {missing_count} frames.")
 
         predicted_values = prediction_lookup[absolute_indices]
+        if success_targets is not None:
+            predicted_values[success_targets == 0.0] = 0.0
         logging.info(
             "Predicted value stats | min=%.6f max=%.6f mean=%.6f std=%.6f",
             float(np.min(predicted_values)),
@@ -614,21 +635,23 @@ def run_value_inference_pipeline(
         thresholds: dict[int, float] | None = None
 
         if cfg.acp.enable:
-            episode_info, task_max_lengths = _build_episode_info(
-                dataset=dataset,
-                success_field=cfg.dataset.success_field,
-                default_success=cfg.dataset.default_success,
-            )
-
-            value_targets = compute_normalized_value_targets(
-                episode_indices=episode_indices,
-                frame_indices=frame_indices,
-                episode_info=episode_info,
-                task_max_lengths=task_max_lengths,
-                c_fail_coef=cfg.acp.c_fail_coef,
-                clip_min=value_cfg.bin_min,
-                clip_max=value_cfg.bin_max,
-            )
+            if success_targets is None:
+                episode_info, task_max_lengths = _build_episode_info(
+                    dataset=dataset,
+                    success_field=cfg.dataset.success_field,
+                    default_success=cfg.dataset.default_success,
+                )
+                value_targets = compute_normalized_value_targets(
+                    episode_indices=episode_indices,
+                    frame_indices=frame_indices,
+                    episode_info=episode_info,
+                    task_max_lengths=task_max_lengths,
+                    c_fail_coef=cfg.acp.c_fail_coef,
+                    clip_min=value_cfg.bin_min,
+                    clip_max=value_cfg.bin_max,
+                )
+            else:
+                value_targets = success_targets
             rewards = _compute_dense_rewards_from_targets(value_targets, episode_indices, frame_indices)
             advantages = _compute_n_step_advantages(
                 rewards=rewards,

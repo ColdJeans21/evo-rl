@@ -71,6 +71,9 @@ class PI05Config(PreTrainedConfig):
         }
     )
 
+    # Exclude repeated episode-tail actions from flow-matching supervision.
+    mask_action_padding_loss: bool = False
+
     # Training settings
     gradient_checkpointing: bool = False  # Enable gradient checkpointing for memory optimization
     compile_model: bool = False  # Whether to use torch.compile for model optimization
