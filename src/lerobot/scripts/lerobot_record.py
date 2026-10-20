@@ -81,7 +81,7 @@ from lerobot.datasets.pipeline_features import aggregate_pipeline_dataset_featur
 from lerobot.datasets.utils import combine_feature_dicts
 from lerobot.datasets.video_utils import VideoEncodingManager
 from lerobot.policies.factory import make_policy, make_pre_post_processors
-from lerobot.processor import make_default_processors
+from lerobot.processor import make_default_processors, make_spacemouse_robot_action_processor
 from lerobot.processor.rename_processor import rename_stats
 from lerobot.robots import (  # noqa: F401
     RobotConfig,
@@ -338,6 +338,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
+    if getattr(teleop, "name", None) == "spacemouse":
+        teleop_action_processor = make_spacemouse_robot_action_processor(teleop.config, robot)
 
     dataset_features = combine_feature_dicts(
         aggregate_pipeline_dataset_features(

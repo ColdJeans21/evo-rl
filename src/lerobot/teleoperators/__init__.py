@@ -15,5 +15,6 @@
 # limitations under the License.
 
 from .config import TeleoperatorConfig
+from . import spacemouse  # noqa: F401
 from .teleoperator import Teleoperator
 from .utils import TeleopEvents, make_teleoperator_from_config

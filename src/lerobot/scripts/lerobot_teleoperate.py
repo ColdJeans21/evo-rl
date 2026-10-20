@@ -68,6 +68,7 @@ from lerobot.processor import (
     RobotObservation,
     RobotProcessorPipeline,
     make_default_processors,
+    make_spacemouse_robot_action_processor,
 )
 from lerobot.robots import (  # noqa: F401
     Robot,
@@ -262,6 +263,8 @@ def teleoperate(cfg: TeleoperateConfig):
     teleop = make_teleoperator_from_config(cfg.teleop)
     robot = make_robot_from_config(cfg.robot)
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
+    if getattr(teleop, "name", None) == "spacemouse":
+        robot_action_processor = make_spacemouse_robot_action_processor(teleop.config, robot)
     should_fetch_obs = _teleop_needs_robot_observation(
         cfg.display_data, teleop_action_processor, robot_action_processor
     )

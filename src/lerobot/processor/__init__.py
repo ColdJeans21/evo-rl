@@ -74,6 +74,7 @@ from .policy_robot_bridge import (
     RobotActionToPolicyActionProcessorStep,
 )
 from .rename_processor import RenameObservationsProcessorStep
+from .spacemouse import make_spacemouse_robot_action_processor
 from .tokenizer_processor import ActionTokenizerProcessorStep, TokenizerProcessorStep
 
 __all__ = [
@@ -112,6 +113,7 @@ __all__ = [
     "RobotActionProcessorStep",
     "RobotObservation",
     "RenameObservationsProcessorStep",
+    "make_spacemouse_robot_action_processor",
     "RewardClassifierProcessorStep",
     "RewardProcessorStep",
     "DataProcessorPipeline",
