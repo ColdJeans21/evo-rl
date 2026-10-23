@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import os
 import re
 from abc import ABC, abstractmethod
@@ -772,7 +773,21 @@ class DataProcessorPipeline(HubMixin, Generic[TInput, TOutput]):
 
         for step_entry in loaded_config["steps"]:
             # 1. Get step class and key
-            step_class, step_key = cls._resolve_step_class(step_entry)
+            try:
+                step_class, step_key = cls._resolve_step_class(step_entry)
+            except ImportError:
+                # Newer checkpoints may contain processor steps that are not available in
+                # the installed LeRobot version. An explicitly disabled step is a no-op, so
+                # it is safe to skip while retaining strict failures for enabled/ambiguous
+                # steps. This keeps old runtimes compatible without silently changing data.
+                if step_entry.get("config", {}).get("enabled") is False:
+                    step_name = step_entry.get("registry_name", step_entry.get("class", "unknown"))
+                    logging.warning(
+                        "Skipping unavailable processor step '%s' because it is explicitly disabled.",
+                        step_name,
+                    )
+                    continue
+                raise
 
             # 2. Instantiate step with overrides
             step_instance = cls._instantiate_step(step_entry, step_class, step_key, overrides)

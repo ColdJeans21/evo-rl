@@ -188,6 +188,49 @@ def test_resolve_step_class_invalid_import_path():
         DataProcessorPipeline._resolve_step_class(step_entry)
 
 
+def test_build_steps_skips_unavailable_explicitly_disabled_step(caplog):
+    config = {
+        "steps": [
+            {
+                "registry_name": "newer_version_noop_step",
+                "config": {"enabled": False},
+            }
+        ]
+    }
+
+    steps, unused_overrides = DataProcessorPipeline._build_steps_with_overrides(
+        loaded_config=config,
+        overrides={},
+        model_id="local-checkpoint",
+        base_path=None,
+        hub_download_kwargs={},
+    )
+
+    assert steps == []
+    assert unused_overrides == set()
+    assert "explicitly disabled" in caplog.text
+
+
+def test_build_steps_rejects_unavailable_enabled_step():
+    config = {
+        "steps": [
+            {
+                "registry_name": "newer_version_active_step",
+                "config": {"enabled": True},
+            }
+        ]
+    }
+
+    with pytest.raises(ImportError, match="Failed to load processor step from registry"):
+        DataProcessorPipeline._build_steps_with_overrides(
+            loaded_config=config,
+            overrides={},
+            model_id="local-checkpoint",
+            base_path=None,
+            hub_download_kwargs={},
+        )
+
+
 # Override Validation Tests
 
 
