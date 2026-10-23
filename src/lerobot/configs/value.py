@@ -65,6 +65,9 @@ class ValueInferenceACPConfig:
     enable: bool = False
     n_step: int = 50
     positive_ratio: float = 0.3
+    # Evo-RL selects starts that are both in the requested top quantile and
+    # strictly positive. Keep False by default for legacy ACP checkpoints.
+    require_positive_advantage: bool = False
     force_intervention_positive: bool = True
 
     intervention_field: str = "complementary_info.is_intervention"

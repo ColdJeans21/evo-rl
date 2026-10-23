@@ -54,3 +54,21 @@ def test_compute_task_thresholds_and_binarize_with_interventions():
     )
 
     assert indicators.tolist() == [0, 1, 1, 0, 1]
+
+
+def test_binarize_can_require_strictly_positive_advantages():
+    task_indices = np.zeros(4, dtype=np.int64)
+    advantages = np.array([-0.4, -0.2, 0.0, 0.3], dtype=np.float32)
+    interventions = np.zeros(4, dtype=np.float32)
+    thresholds = _compute_task_thresholds(task_indices, advantages, positive_ratio=0.75)
+
+    indicators = _binarize_advantages(
+        task_indices=task_indices,
+        advantages=advantages,
+        thresholds=thresholds,
+        interventions=interventions,
+        force_intervention_positive=False,
+        require_positive_advantage=True,
+    )
+
+    assert indicators.tolist() == [0, 0, 0, 1]

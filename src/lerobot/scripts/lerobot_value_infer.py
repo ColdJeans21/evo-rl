@@ -305,13 +305,18 @@ def _binarize_advantages(
     thresholds: dict[int, float],
     interventions: np.ndarray,
     force_intervention_positive: bool,
+    require_positive_advantage: bool = False,
 ) -> np.ndarray:
     indicators = np.zeros_like(advantages, dtype=np.int64)
 
     for i in range(advantages.shape[0]):
         task_idx = int(task_indices[i])
         threshold = thresholds[task_idx]
-        indicators[i] = 1 if float(advantages[i]) >= threshold else 0
+        advantage = float(advantages[i])
+        is_selected = advantage >= threshold
+        if require_positive_advantage:
+            is_selected = is_selected and advantage > 0.0
+        indicators[i] = int(is_selected)
 
     if force_intervention_positive:
         intervention_mask = interventions.astype(np.float32) > 0.5
@@ -671,13 +676,16 @@ def run_value_inference_pipeline(
                 thresholds=thresholds,
                 interventions=interventions,
                 force_intervention_positive=cfg.acp.force_intervention_positive,
+                require_positive_advantage=cfg.acp.require_positive_advantage,
             )
 
             indicator_positive_ratio = float(np.mean(indicators.astype(np.float32)))
             logging.info(
-                "ACP stats | n_step=%d positive_ratio_target=%.4f positive_ratio_observed=%.4f",
+                "ACP stats | n_step=%d positive_ratio_target=%.4f "
+                "require_positive_advantage=%s positive_ratio_observed=%.4f",
                 cfg.acp.n_step,
                 cfg.acp.positive_ratio,
+                cfg.acp.require_positive_advantage,
                 indicator_positive_ratio,
             )
 
