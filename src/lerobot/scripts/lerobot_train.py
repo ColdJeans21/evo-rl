@@ -402,6 +402,8 @@ def train(
     dl_iter = cycle(dataloader)
 
     policy.train()
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     train_metrics = {
         "loss": AverageMeter("loss", ":.3f"),
@@ -482,6 +484,23 @@ def train(
 
         if is_log_step:
             logging.info(train_tracker)
+            if device.type == "cuda":
+                gib = 1024**3
+                gpu_memory = {
+                    "gpu_memory_allocated_gib": torch.cuda.memory_allocated(device) / gib,
+                    "gpu_memory_reserved_gib": torch.cuda.memory_reserved(device) / gib,
+                    "gpu_memory_peak_allocated_gib": torch.cuda.max_memory_allocated(device) / gib,
+                    "gpu_memory_peak_reserved_gib": torch.cuda.max_memory_reserved(device) / gib,
+                }
+                output_dict.update(gpu_memory)
+                logging.info(
+                    "GPU memory: allocated=%.2f GiB reserved=%.2f GiB peak_allocated=%.2f GiB "
+                    "peak_reserved=%.2f GiB",
+                    gpu_memory["gpu_memory_allocated_gib"],
+                    gpu_memory["gpu_memory_reserved_gib"],
+                    gpu_memory["gpu_memory_peak_allocated_gib"],
+                    gpu_memory["gpu_memory_peak_reserved_gib"],
+                )
             if wandb_logger:
                 wandb_log_dict = train_tracker.to_dict()
                 if output_dict:
