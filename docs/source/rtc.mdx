@@ -137,6 +137,33 @@ The script generates a visualization of the denoising process, comparing standar
 
 ## Testing RTC with a Real Robot
 
+For a policy rollout that also records a dataset and keeps a leader arm ready
+for intervention, use the human-in-loop recorder. The recorder requests chunks
+asynchronously, invalidates queued policy actions when intervention begins, and
+starts from a fresh chunk when policy control resumes:
+
+```bash
+lerobot-human-inloop-record \
+    <ROBOT_TELEOP_DATASET_ARGS> \
+    --policy.path=<POLICY_CHECKPOINT_OR_HUB_ID> \
+    --rtc.enabled=true \
+    --rtc.execution_horizon=10 \
+    --rtc.max_guidance_weight=10.0 \
+    --rtc.prefix_attention_schedule=EXP \
+    --rtc_action_queue_size_to_get_new_actions=30 \
+    --rtc_action_timeout_s=10
+```
+
+`rtc_action_queue_size_to_get_new_actions` must be greater than
+`rtc.execution_horizon`, smaller than the policy chunk size, and large enough
+to cover the execution horizon plus inference latency (measured in control
+steps). In RTC mode, `policy.n_action_steps` is not used to decide when to
+refresh a chunk. RTC and ACP inference cannot currently be enabled together in
+the recorder.
+
+The standalone RTC example remains useful when recording and human takeover
+are not needed:
+
 ```bash
 python examples/rtc/eval_with_real_robot.py \
     --policy.path=${HF_USERNAME}/policy_repo_id \

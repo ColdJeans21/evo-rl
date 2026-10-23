@@ -40,6 +40,7 @@ from lerobot.scripts.recording_hil import (
     INTERVENTION_STATE_RELEASE,
     ACPInferenceConfig,
     PolicySyncDualArmExecutor,
+    RTCPolicyActionProvider,
     _capture_policy_runtime_state,
     _predict_policy_action_with_acp_inference,
 )
@@ -112,11 +113,14 @@ def record_loop(
     collector_policy_id_policy: str = "policy",
     collector_policy_id_human: str = "human",
     acp_inference: ACPInferenceConfig | None = None,
+    rtc_policy_action_provider: RTCPolicyActionProvider | None = None,
     communication_retry_timeout_s: float = 2.0,
     communication_retry_interval_s: float = 0.1,
 ):
     if acp_inference is None:
         acp_inference = ACPInferenceConfig()
+    if rtc_policy_action_provider is not None and acp_inference.enable:
+        raise ValueError("RTC policy recording does not currently support ACP inference.")
 
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -179,8 +183,11 @@ def record_loop(
         # During reset/teleop-only loops keep leader backdrivable for manual dragging.
         set_teleop_manual_control(True)
 
-    # Reset policy and processor if they are provided
+    # Reset policy and processor if they are provided. RTC may still be finishing a
+    # stale request from the preceding episode, so drain it before touching model state.
     if policy is not None and preprocessor is not None and postprocessor is not None:
+        if rtc_policy_action_provider is not None:
+            rtc_policy_action_provider.reset(wait_for_inference=True)
         policy.reset()
         preprocessor.reset()
         postprocessor.reset()
@@ -249,9 +256,16 @@ def record_loop(
             if intervention_enabled:
                 if intervention_state == INTERVENTION_STATE_POLICY:
                     set_teleop_manual_control(True)
+                    if rtc_policy_action_provider is not None:
+                        # Invalidate queued and in-flight policy actions immediately. The
+                        # worker may finish computing, but its stale chunk cannot be merged.
+                        rtc_policy_action_provider.reset(wait_for_inference=False)
                     intervention_state = INTERVENTION_STATE_ACTIVE
                     logging.info("Intervention enabled (S1): teleop actions now override policy execution.")
                 else:
+                    if rtc_policy_action_provider is not None:
+                        # Keep the leader backdrivable until any stale inference has exited.
+                        rtc_policy_action_provider.reset(wait_for_inference=True)
                     set_teleop_manual_control(False)
                     intervention_state = INTERVENTION_STATE_RELEASE
                     if policy is not None and preprocessor is not None and postprocessor is not None:
@@ -285,19 +299,26 @@ def record_loop(
             and postprocessor is not None
             and not (intervention_enabled and intervention_state == INTERVENTION_STATE_ACTIVE)
         ):
-            policy_action = _predict_policy_action_with_acp_inference(
-                observation_frame=observation_frame,
-                policy=policy,
-                device=get_safe_torch_device(policy.config.device),
-                preprocessor=preprocessor,
-                postprocessor=postprocessor,
-                use_amp=policy.config.use_amp,
-                task=single_task,
-                robot_type=robot.robot_type,
-                acp_inference=acp_inference,
-                cond_runtime_state=cond_policy_runtime_state,
-                uncond_runtime_state=uncond_policy_runtime_state,
-            )
+            if rtc_policy_action_provider is not None:
+                policy_action = rtc_policy_action_provider.get_action(
+                    observation_frame=observation_frame,
+                    task=single_task,
+                    robot_type=robot.robot_type,
+                )
+            else:
+                policy_action = _predict_policy_action_with_acp_inference(
+                    observation_frame=observation_frame,
+                    policy=policy,
+                    device=get_safe_torch_device(policy.config.device),
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    use_amp=policy.config.use_amp,
+                    task=single_task,
+                    robot_type=robot.robot_type,
+                    acp_inference=acp_inference,
+                    cond_runtime_state=cond_policy_runtime_state,
+                    uncond_runtime_state=uncond_policy_runtime_state,
+                )
             act_processed_policy = make_robot_action(policy_action, dataset.features)
 
         if isinstance(teleop, Teleoperator):
@@ -414,3 +435,8 @@ def record_loop(
         precise_sleep(max(1 / fps - dt_s, 0.0))
 
         timestamp = time.perf_counter() - start_episode_t
+
+    if rtc_policy_action_provider is not None:
+        # No policy action is executed after this function returns, so invalidate any
+        # request that might still be completing while the episode is being finalized.
+        rtc_policy_action_provider.reset(wait_for_inference=False)

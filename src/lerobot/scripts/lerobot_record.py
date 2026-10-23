@@ -81,6 +81,7 @@ from lerobot.datasets.pipeline_features import aggregate_pipeline_dataset_featur
 from lerobot.datasets.utils import combine_feature_dicts
 from lerobot.datasets.video_utils import VideoEncodingManager
 from lerobot.policies.factory import make_policy, make_pre_post_processors
+from lerobot.policies.rtc.configuration_rtc import RTCConfig
 from lerobot.processor import make_default_processors, make_spacemouse_robot_action_processor
 from lerobot.processor.rename_processor import rename_stats
 from lerobot.robots import (  # noqa: F401
@@ -102,6 +103,7 @@ from lerobot.robots import (  # noqa: F401
 from lerobot.scripts.recording_hil import (
     ACPInferenceConfig,
     PolicySyncDualArmExecutor,
+    RTCPolicyActionProvider,
     _capture_policy_runtime_state,  # noqa: F401
     _predict_policy_action_with_acp_inference,  # noqa: F401
 )
@@ -235,6 +237,12 @@ class RecordConfig:
     collector_policy_id_human: str = "human"
     # ACP inference controls for policy-driven recording.
     acp_inference: ACPInferenceConfig = field(default_factory=ACPInferenceConfig)
+    # Real-Time Chunking controls for asynchronous policy-driven recording.
+    rtc: RTCConfig = field(default_factory=RTCConfig)
+    # Request a replacement chunk when this many actions remain in the RTC queue.
+    rtc_action_queue_size_to_get_new_actions: int = 30
+    # Maximum time to wait when the RTC action queue is empty (for example, initial inference).
+    rtc_action_timeout_s: float = 10.0
     # Retry timeout for transient communication errors (seconds). Set to 0 to fail immediately.
     communication_retry_timeout_s: float = 2.0
     # Sleep interval between communication retries (seconds).
@@ -284,6 +292,39 @@ class RecordConfig:
             raise ValueError("`acp_inference.use_cfg=true` requires `acp_inference.enable=true`.")
         if self.acp_inference.cfg_beta < 0:
             raise ValueError("`acp_inference.cfg_beta` must be >= 0.")
+        if (
+            self.policy is not None
+            and self.policy.type in RTCPolicyActionProvider.SUPPORTED_POLICY_NAMES
+        ):
+            # RTC is a recording-time option. Override any value serialized in the
+            # checkpoint so the top-level `--rtc.*` flags remain authoritative.
+            self.policy.rtc_config = self.rtc
+        if self.rtc.enabled:
+            if self.policy is None:
+                raise ValueError("`rtc.enabled=true` requires `policy` to be set.")
+            if self.policy.type not in RTCPolicyActionProvider.SUPPORTED_POLICY_NAMES:
+                supported = ", ".join(sorted(RTCPolicyActionProvider.SUPPORTED_POLICY_NAMES))
+                raise ValueError(f"RTC recording supports policies [{supported}], got {self.policy.type!r}.")
+            if self.acp_inference.enable:
+                raise ValueError("RTC recording does not currently support ACP inference.")
+            if self.rtc.execution_horizon <= 0:
+                raise ValueError("`rtc.execution_horizon` must be positive.")
+            if self.rtc_action_queue_size_to_get_new_actions <= self.rtc.execution_horizon:
+                raise ValueError(
+                    "`rtc_action_queue_size_to_get_new_actions` must be greater than "
+                    "`rtc.execution_horizon`."
+                )
+            chunk_size = getattr(self.policy, "chunk_size", None)
+            if (
+                chunk_size is not None
+                and self.rtc_action_queue_size_to_get_new_actions >= chunk_size
+            ):
+                raise ValueError(
+                    "`rtc_action_queue_size_to_get_new_actions` must be smaller than "
+                    f"`policy.chunk_size` ({self.rtc_action_queue_size_to_get_new_actions} >= {chunk_size})."
+                )
+        if self.rtc_action_timeout_s <= 0:
+            raise ValueError("`rtc_action_timeout_s` must be positive.")
         if self.communication_retry_timeout_s < 0:
             raise ValueError("`communication_retry_timeout_s` must be >= 0.")
         if self.communication_retry_interval_s <= 0:
@@ -369,6 +410,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     dataset = None
     listener = None
     policy_sync_executor = None
+    rtc_policy_action_provider = None
 
     try:
         if cfg.resume:
@@ -416,6 +458,17 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     "device_processor": {"device": cfg.policy.device},
                     "rename_observations_processor": {"rename_map": cfg.dataset.rename_map},
                 },
+            )
+        if cfg.rtc.enabled:
+            assert policy is not None and preprocessor is not None and postprocessor is not None
+            rtc_policy_action_provider = RTCPolicyActionProvider(
+                policy=policy,
+                preprocessor=preprocessor,
+                postprocessor=postprocessor,
+                rtc_config=cfg.rtc,
+                fps=cfg.dataset.fps,
+                action_queue_size_to_get_new_actions=cfg.rtc_action_queue_size_to_get_new_actions,
+                action_timeout_s=cfg.rtc_action_timeout_s,
             )
 
         collector_policy_id_policy = (
@@ -477,6 +530,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     collector_policy_id_policy=collector_policy_id_policy,
                     collector_policy_id_human=collector_policy_id_human,
                     acp_inference=cfg.acp_inference,
+                    rtc_policy_action_provider=rtc_policy_action_provider,
                     communication_retry_timeout_s=cfg.communication_retry_timeout_s,
                     communication_retry_interval_s=cfg.communication_retry_interval_s,
                 )
@@ -556,6 +610,9 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
         if policy_sync_executor is not None:
             policy_sync_executor.shutdown()
+
+        if rtc_policy_action_provider is not None:
+            rtc_policy_action_provider.close()
 
         if robot.is_connected:
             robot.disconnect()

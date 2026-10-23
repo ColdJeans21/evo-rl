@@ -154,13 +154,17 @@ def human_inloop_record(cfg: RecordConfig):
         "Recorded `action` is the executed action. "
         "Policy output (when policy is enabled) is stored in `complementary_info.policy_action`. "
         "Collector source is stored in `complementary_info.collector_policy_id`. "
-        "ACP inference: enable=%s use_cfg=%s cfg_beta=%.3f.",
+        "ACP inference: enable=%s use_cfg=%s cfg_beta=%.3f. "
+        "RTC: enabled=%s execution_horizon=%d queue_threshold=%d.",
         cfg.intervention_toggle_key,
         cfg.episode_success_key,
         cfg.episode_failure_key,
         cfg.acp_inference.enable,
         cfg.acp_inference.use_cfg,
         cfg.acp_inference.cfg_beta,
+        cfg.rtc.enabled,
+        cfg.rtc.execution_horizon,
+        cfg.rtc_action_queue_size_to_get_new_actions,
     )
     return record(cfg)
 

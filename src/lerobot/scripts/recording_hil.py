@@ -14,21 +14,31 @@
 
 """Human-in-loop recording helpers used by `lerobot_record.py`."""
 
+import logging
+import math
+import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
+from threading import Condition, Thread
 from typing import Any
 
 import numpy as np
 import torch
 
 from lerobot.policies.pretrained import PreTrainedPolicy
+from lerobot.policies.rtc.action_queue import ActionQueue
+from lerobot.policies.rtc.configuration_rtc import RTCConfig
+from lerobot.policies.rtc.latency_tracker import LatencyTracker
+from lerobot.policies.utils import prepare_observation_for_inference
 from lerobot.processor import PolicyAction, PolicyProcessorPipeline, RobotAction
 from lerobot.rl.acp_tags import build_acp_tagged_task
 from lerobot.robots import Robot
 from lerobot.teleoperators import Teleoperator
 from lerobot.utils.control_utils import predict_action
+from lerobot.utils.utils import get_safe_torch_device
 
 
 @dataclass
@@ -36,6 +46,230 @@ class ACPInferenceConfig:
     enable: bool = False
     use_cfg: bool = False
     cfg_beta: float = 1.0
+
+
+class RTCPolicyActionProvider:
+    """Generate and merge RTC action chunks without blocking the robot control loop."""
+
+    SUPPORTED_POLICY_NAMES = {"pi0", "pi05", "smolvla"}
+
+    def __init__(
+        self,
+        *,
+        policy: PreTrainedPolicy,
+        preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+        postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction],
+        rtc_config: RTCConfig,
+        fps: int,
+        action_queue_size_to_get_new_actions: int,
+        action_timeout_s: float,
+    ) -> None:
+        if not rtc_config.enabled:
+            raise ValueError("RTCPolicyActionProvider requires `rtc_config.enabled=true`.")
+        if policy.name not in self.SUPPORTED_POLICY_NAMES:
+            supported = ", ".join(sorted(self.SUPPORTED_POLICY_NAMES))
+            raise ValueError(f"RTC recording supports policies [{supported}], got {policy.name!r}.")
+        if action_queue_size_to_get_new_actions <= rtc_config.execution_horizon:
+            raise ValueError(
+                "`rtc_action_queue_size_to_get_new_actions` must be greater than "
+                "`rtc.execution_horizon`."
+            )
+        if action_timeout_s <= 0:
+            raise ValueError("`rtc_action_timeout_s` must be positive.")
+
+        chunk_size = getattr(policy.config, "chunk_size", None)
+        if chunk_size is not None and action_queue_size_to_get_new_actions >= chunk_size:
+            raise ValueError(
+                "`rtc_action_queue_size_to_get_new_actions` must be smaller than the policy chunk size "
+                f"({action_queue_size_to_get_new_actions} >= {chunk_size})."
+            )
+
+        self.policy = policy
+        self.preprocessor = preprocessor
+        self.postprocessor = postprocessor
+        self.rtc_config = rtc_config
+        self.fps = fps
+        self.action_queue_size_to_get_new_actions = action_queue_size_to_get_new_actions
+        self.action_timeout_s = action_timeout_s
+        self.device = get_safe_torch_device(policy.config.device)
+        self.use_amp = policy.config.use_amp
+
+        # Keep the model and queue configuration in sync even when a caller enables RTC
+        # after loading a checkpoint whose saved config had RTC disabled.
+        self.policy.config.rtc_config = rtc_config
+        self.policy.init_rtc_processor()
+
+        self._condition = Condition()
+        self._queue = ActionQueue(rtc_config)
+        self._latency_tracker = LatencyTracker()
+        self._request: tuple[int, dict[str, np.ndarray], str | None, str | None] | None = None
+        self._inference_active = False
+        self._error: BaseException | None = None
+        self._closed = False
+        self._epoch = 0
+        self._thread = Thread(target=self._worker, name="rtc-policy-inference", daemon=True)
+        self._thread.start()
+
+    @staticmethod
+    def _copy_observation(observation_frame: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        return {key: np.array(value, copy=True) for key, value in observation_frame.items()}
+
+    def _raise_worker_error(self) -> None:
+        if self._error is not None:
+            raise RuntimeError("RTC policy inference worker failed.") from self._error
+
+    def _request_chunk_if_needed(
+        self,
+        observation_frame: dict[str, np.ndarray],
+        task: str | None,
+        robot_type: str | None,
+    ) -> None:
+        with self._condition:
+            self._raise_worker_error()
+            if (
+                self._queue.qsize() <= self.action_queue_size_to_get_new_actions
+                and self._request is None
+                and not self._inference_active
+            ):
+                self._request = (
+                    self._epoch,
+                    self._copy_observation(observation_frame),
+                    task,
+                    robot_type,
+                )
+                self._condition.notify_all()
+
+    def get_action(
+        self,
+        *,
+        observation_frame: dict[str, np.ndarray],
+        task: str | None,
+        robot_type: str | None,
+    ) -> PolicyAction:
+        """Return the next postprocessed action, waiting only if the queue runs dry."""
+        self._request_chunk_if_needed(observation_frame, task, robot_type)
+
+        deadline = time.perf_counter() + self.action_timeout_s
+        while True:
+            action = self._queue.get()
+            if action is not None:
+                return action
+
+            with self._condition:
+                self._raise_worker_error()
+                remaining_s = deadline - time.perf_counter()
+                if remaining_s <= 0:
+                    raise TimeoutError(
+                        f"Timed out after {self.action_timeout_s:.1f}s waiting for an RTC action chunk."
+                    )
+                self._condition.wait(timeout=remaining_s)
+
+    def reset(self, *, wait_for_inference: bool) -> None:
+        """Discard queued/stale actions and optionally wait for an in-flight request."""
+        with self._condition:
+            self._epoch += 1
+            self._queue = ActionQueue(self.rtc_config)
+            self._request = None
+            self._error = None
+            self._latency_tracker.reset()
+            self._condition.notify_all()
+            if wait_for_inference:
+                self._condition.wait_for(lambda: not self._inference_active)
+
+    def close(self) -> None:
+        with self._condition:
+            if self._closed:
+                return
+            self._closed = True
+            self._epoch += 1
+            self._request = None
+            self._condition.notify_all()
+        self._thread.join(timeout=max(self.action_timeout_s, 1.0))
+        if self._thread.is_alive():
+            logging.warning("RTC inference thread did not stop within %.1fs.", self.action_timeout_s)
+
+    def _worker(self) -> None:
+        while True:
+            with self._condition:
+                self._condition.wait_for(lambda: self._closed or self._request is not None)
+                if self._closed:
+                    return
+                request = self._request
+                self._request = None
+                self._inference_active = True
+
+            assert request is not None
+            epoch, observation_frame, task, robot_type = request
+            queue = self._queue
+            action_index_before_inference = queue.get_action_index()
+            prev_chunk_left_over = queue.get_left_over()
+            inference_delay = math.ceil(self._latency_tracker.max() * self.fps)
+            started_t = time.perf_counter()
+
+            try:
+                observation = prepare_observation_for_inference(
+                    observation_frame,
+                    self.device,
+                    task,
+                    robot_type,
+                )
+                observation = self.preprocessor(observation)
+                autocast_context = (
+                    torch.autocast(device_type=self.device.type)
+                    if self.device.type == "cuda" and self.use_amp
+                    else nullcontext()
+                )
+                with autocast_context:
+                    normalized_actions = self.policy.predict_action_chunk(
+                        observation,
+                        inference_delay=inference_delay,
+                        prev_chunk_left_over=prev_chunk_left_over,
+                    )
+                    original_actions = normalized_actions.squeeze(0).detach().clone()
+                    processed_actions = self.postprocessor(normalized_actions).squeeze(0)
+
+                latency_s = time.perf_counter() - started_t
+
+                with self._condition:
+                    if epoch == self._epoch and queue is self._queue and not self._closed:
+                        self._latency_tracker.add(latency_s)
+                        actions_consumed_during_inference = max(
+                            queue.get_action_index() - action_index_before_inference,
+                            0,
+                        )
+                        if (
+                            self.action_queue_size_to_get_new_actions
+                            < self.rtc_config.execution_horizon + actions_consumed_during_inference
+                        ):
+                            logging.warning(
+                                "RTC queue threshold (%d) is too small for the observed inference delay "
+                                "(%d steps) plus execution horizon (%d); increase "
+                                "`rtc_action_queue_size_to_get_new_actions`.",
+                                self.action_queue_size_to_get_new_actions,
+                                actions_consumed_during_inference,
+                                self.rtc_config.execution_horizon,
+                            )
+                        queue.merge(
+                            original_actions,
+                            processed_actions,
+                            actions_consumed_during_inference,
+                            action_index_before_inference,
+                        )
+                        logging.debug(
+                            "RTC chunk ready: latency=%.3fs predicted_delay=%d actual_delay=%d queue=%d",
+                            latency_s,
+                            inference_delay,
+                            actions_consumed_during_inference,
+                            queue.qsize(),
+                        )
+            except BaseException as error:
+                with self._condition:
+                    if epoch == self._epoch and not self._closed:
+                        self._error = error
+            finally:
+                with self._condition:
+                    self._inference_active = False
+                    self._condition.notify_all()
 
 
 POLICY_RUNTIME_STATE_KEYS = ("_action_queue", "_queues", "_prev_mean")

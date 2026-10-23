@@ -496,6 +496,27 @@ lerobot-human-inloop-record \
   --resume=true
 ```
 
+For Pi0, Pi0.5, and SmolVLA, the same human-in-loop recorder can asynchronously
+replan and blend overlapping action chunks with Real-Time Chunking (RTC):
+
+```bash
+lerobot-human-inloop-record \
+  <ROBOT_TELEOP_DATASET_ARGS> \
+  --policy.path=<POLICY_CHECKPOINT_OR_HUB_ID> \
+  --rtc.enabled=true \
+  --rtc.execution_horizon=10 \
+  --rtc.max_guidance_weight=10.0 \
+  --rtc.prefix_attention_schedule=EXP \
+  --rtc_action_queue_size_to_get_new_actions=30 \
+  --rtc_action_timeout_s=10
+```
+
+The queue threshold must be larger than `rtc.execution_horizon` and smaller
+than the policy chunk size. It should also exceed the execution horizon plus
+the measured inference delay in control steps. RTC uses `predict_action_chunk`
+directly, so `policy.n_action_steps` does not control the refresh interval in
+this mode. ACP inference and RTC recording are currently mutually exclusive.
+
 Dataset continuation options:
 
 - **Append in place:** keep `--resume=true` and continue recording into the same dataset.
