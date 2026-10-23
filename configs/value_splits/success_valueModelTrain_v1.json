@@ -1,0 +1,24 @@
+{
+  "dataset": "success_valueModelTrain",
+  "created_at": "2026-10-23",
+  "strategy": "episode-level stratified holdout by source and takeover count; representative frame count, return cost, and intervention-frame ratio; maximum-cost episode retained in training",
+  "validation_fraction_target": 0.15,
+  "validation_episodes": [1, 4, 10, 21, 25, 46, 50, 55, 56, 67, 71, 72, 89, 91, 92, 93],
+  "summary": {
+    "total_episodes": 103,
+    "training_episodes": 87,
+    "validation_episodes": 16,
+    "total_frames": 120582,
+    "training_frames": 101942,
+    "validation_frames": 18640,
+    "validation_frame_fraction": 0.15458360285946493,
+    "validation_human_flag_frames": 2070,
+    "validation_takeover_events": 8
+  },
+  "validation_strata": {
+    "demonstration": 9,
+    "rollout_no_takeover": 1,
+    "rollout_one_takeover": 4,
+    "rollout_multiple_takeovers": 2
+  }
+}

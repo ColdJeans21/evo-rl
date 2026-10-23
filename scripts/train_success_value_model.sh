@@ -5,7 +5,7 @@ set -Eeuo pipefail
 readonly PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly TRAIN_BIN="/home/xiaozhi/miniconda3/envs/evo-rl/bin/lerobot-value-train"
 readonly DATASET_ROOT="/home/xiaozhi/so101_collect_data/success_valueModelTrain"
-readonly RUN_NAME="pistar06_pi05_time_takeover_v1"
+readonly RUN_NAME="pistar06_pi05_time_takeover_ModelValueTrain_v1"
 readonly OUTPUT_DIR="${PROJECT_ROOT}/outputs/value_train/${RUN_NAME}"
 
 if (( $# > 1 )) || { (( $# == 1 )) && [[ "$1" != "--dry-run" ]]; }; then
@@ -40,14 +40,19 @@ command_args=(
   --reward.takeover_cost=150
   --reward.intervention_field=complementary_info.is_intervention
   --targets.success_field=episode_success
+  --validation.episodes='[1,4,10,21,25,46,50,55,56,67,71,72,89,91,92,93]'
+  --validation.freq=8000
+  --validation.batch_size=32
+  --validation.num_workers=4
+  --validation.run_at_start=true
   --batch_size=32
   --steps=16000
   --num_workers=4
   --log_freq=50
   --save_checkpoint=true
-  --save_freq=4000
+  --save_freq=8000
   --wandb.enable=true
-  --wandb.project=evo-rl-value
+  --wandb.project=evo-rl-valueTrain
   --wandb.disable_artifact=true
   "--output_dir=${OUTPUT_DIR}"
   "--job_name=${RUN_NAME}"

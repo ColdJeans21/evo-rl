@@ -48,6 +48,29 @@ class ValueTargetsConfig:
 
 
 @dataclass
+class ValueValidationConfig:
+    """Held-out episode validation for value training."""
+
+    episodes: list[int] = field(default_factory=list)
+    freq: int = 0
+    batch_size: int = 32
+    num_workers: int = 4
+    run_at_start: bool = True
+
+    def validate(self) -> None:
+        if len(self.episodes) != len(set(self.episodes)):
+            raise ValueError("'validation.episodes' must not contain duplicates.")
+        if any(episode < 0 for episode in self.episodes):
+            raise ValueError("'validation.episodes' must contain non-negative episode indices.")
+        if self.episodes and self.freq <= 0:
+            raise ValueError("'validation.freq' must be > 0 when validation episodes are configured.")
+        if self.batch_size <= 0:
+            raise ValueError("'validation.batch_size' must be > 0.")
+        if self.num_workers < 0:
+            raise ValueError("'validation.num_workers' must be >= 0.")
+
+
+@dataclass
 class ValueTrainPipelineConfig(HubMixin):
     dataset: DatasetConfig
     value: PreTrainedConfig | None = field(default_factory=Pistar06Config)
@@ -75,6 +98,7 @@ class ValueTrainPipelineConfig(HubMixin):
 
     reward: ValueRewardConfig | None = None
     targets: ValueTargetsConfig = field(default_factory=ValueTargetsConfig)
+    validation: ValueValidationConfig = field(default_factory=ValueValidationConfig)
     wandb: WandBConfig = field(default_factory=WandBConfig)
     peft: PeftConfig | None = None
 
@@ -115,8 +139,20 @@ class ValueTrainPipelineConfig(HubMixin):
             )
 
         self.targets.validate()
+        self.validation.validate()
         if self.reward is not None:
             self.reward.validate()
+
+        if self.validation.episodes:
+            if self.dataset.streaming:
+                raise ValueError("Held-out value validation is not supported for streaming datasets.")
+            if self.dataset.episodes is not None:
+                overlap = sorted(set(self.dataset.episodes) & set(self.validation.episodes))
+                if overlap:
+                    raise ValueError(
+                        "Training and validation episodes must be disjoint; "
+                        f"overlap={overlap}."
+                    )
 
         if hasattr(self.value, "target_key"):
             self.value.target_key = self.targets.target_field

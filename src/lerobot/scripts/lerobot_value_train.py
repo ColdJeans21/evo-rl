@@ -3,6 +3,7 @@
 import logging
 import time
 from contextlib import nullcontext
+from copy import deepcopy
 from pprint import pformat
 from typing import Any
 
@@ -14,6 +15,7 @@ from torch.optim import Optimizer
 from lerobot.configs import parser
 from lerobot.configs.value_train import ValueTrainPipelineConfig
 from lerobot.datasets.factory import make_dataset
+from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
 from lerobot.datasets.utils import cycle
 from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies.factory import make_policy, make_pre_post_processors
@@ -74,6 +76,74 @@ def update_policy(
     return train_metrics, output_dict
 
 
+def _resolve_episode_split(cfg: ValueTrainPipelineConfig) -> None:
+    """Resolve and record the training complement of held-out validation episodes."""
+    if not cfg.validation.episodes:
+        return
+
+    metadata = LeRobotDatasetMetadata(
+        cfg.dataset.repo_id,
+        root=cfg.dataset.root,
+        revision=cfg.dataset.revision,
+    )
+    episode_table = metadata.episodes.with_format(None)
+    all_episodes = sorted(int(index) for index in episode_table["episode_index"])
+    validation = set(cfg.validation.episodes)
+    unknown = sorted(validation - set(all_episodes))
+    if unknown:
+        raise ValueError(f"Validation episodes do not exist in the dataset: {unknown}.")
+
+    if cfg.dataset.episodes is None:
+        cfg.dataset.episodes = [index for index in all_episodes if index not in validation]
+    else:
+        unknown_train = sorted(set(cfg.dataset.episodes) - set(all_episodes))
+        if unknown_train:
+            raise ValueError(f"Training episodes do not exist in the dataset: {unknown_train}.")
+    if not cfg.dataset.episodes:
+        raise ValueError("The validation split leaves no episodes for training.")
+
+
+@torch.inference_mode()
+def evaluate_value_model(
+    policy: PreTrainedPolicy,
+    dataloader,
+    value_target_raw_batch_hook,
+    preprocessor,
+    accelerator: Accelerator,
+    step: int,
+) -> dict[str, float]:
+    """Evaluate frame-weighted loss and MAE on a deterministic held-out loader."""
+    policy.eval()
+    gathered_metrics = []
+    try:
+        for batch in dataloader:
+            if value_target_raw_batch_hook is not None:
+                batch = value_target_raw_batch_hook(batch, step)
+            batch = preprocessor(batch)
+            with accelerator.autocast():
+                loss, output_dict = policy.forward(batch)
+
+            batch_size = next(
+                int(value.shape[0])
+                for value in batch.values()
+                if isinstance(value, torch.Tensor) and value.ndim > 0
+            )
+            value_mae = float(output_dict["value_mae"])
+            # Expanding each batch mean lets gather_for_metrics remove any
+            # distributed-loader padding while preserving frame weighting.
+            local = torch.empty((batch_size, 2), device=accelerator.device, dtype=torch.float64)
+            local[:, 0] = loss.detach().to(dtype=torch.float64)
+            local[:, 1] = value_mae
+            gathered_metrics.append(accelerator.gather_for_metrics(local).cpu())
+    finally:
+        policy.train()
+
+    if not gathered_metrics:
+        raise RuntimeError("Validation dataloader produced no batches.")
+    metrics = torch.cat(gathered_metrics, dim=0).mean(dim=0)
+    return {"loss": float(metrics[0]), "value_mae": float(metrics[1])}
+
+
 @parser.wrap()
 def value_train(
     cfg: ValueTrainPipelineConfig,
@@ -95,6 +165,8 @@ def value_train(
     init_logging(accelerator=accelerator)
     is_main_process = accelerator.is_main_process
 
+    _resolve_episode_split(cfg)
+
     if is_main_process:
         logging.info(pformat(cfg.to_dict()))
 
@@ -112,11 +184,21 @@ def value_train(
     if is_main_process:
         logging.info("Creating dataset")
         dataset = make_dataset(cfg)
+        validation_dataset = None
+        if cfg.validation.episodes:
+            validation_cfg = deepcopy(cfg)
+            validation_cfg.dataset.episodes = list(cfg.validation.episodes)
+            validation_dataset = make_dataset(validation_cfg)
 
     accelerator.wait_for_everyone()
 
     if not is_main_process:
         dataset = make_dataset(cfg)
+        validation_dataset = None
+        if cfg.validation.episodes:
+            validation_cfg = deepcopy(cfg)
+            validation_cfg.dataset.episodes = list(cfg.validation.episodes)
+            validation_dataset = make_dataset(validation_cfg)
 
     if is_main_process:
         logging.info("Creating value model")
@@ -127,6 +209,7 @@ def value_train(
     )
 
     value_target_raw_batch_hook = None
+    validation_target_raw_batch_hook = None
     if has_method(value_model, "build_training_raw_batch_hook"):
         value_target_raw_batch_hook = value_model.build_training_raw_batch_hook(
             dataset=dataset,
@@ -134,6 +217,14 @@ def value_train(
             reward_cfg=cfg.reward,
         )
         cfg.reward = value_model.config.reward
+        if validation_dataset is not None:
+            # The training hook fits and stores task scales first. The held-out
+            # targets must reuse those scales instead of fitting on validation.
+            validation_target_raw_batch_hook = value_model.build_training_raw_batch_hook(
+                dataset=validation_dataset,
+                targets_cfg=cfg.targets,
+                reward_cfg=cfg.reward,
+            )
         if is_main_process:
             logging.info("Using value model raw-batch hook for target construction.")
     elif is_main_process:
@@ -194,6 +285,9 @@ def value_train(
         logging.info(f"{cfg.steps=} ({format_big_number(cfg.steps)})")
         logging.info(f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})")
         logging.info(f"{dataset.num_episodes=}")
+        if validation_dataset is not None:
+            logging.info(f"validation_dataset.num_frames={validation_dataset.num_frames}")
+            logging.info(f"validation_dataset.num_episodes={validation_dataset.num_episodes}")
         num_processes = accelerator.num_processes
         effective_bs = cfg.batch_size * num_processes
         logging.info(f"Effective batch size: {cfg.batch_size} x {num_processes} = {effective_bs}")
@@ -210,11 +304,28 @@ def value_train(
         drop_last=False,
         prefetch_factor=2 if cfg.num_workers > 0 else None,
     )
+    validation_dataloader = None
+    if validation_dataset is not None:
+        validation_dataloader = torch.utils.data.DataLoader(
+            validation_dataset,
+            num_workers=cfg.validation.num_workers,
+            batch_size=cfg.validation.batch_size,
+            shuffle=False,
+            sampler=None,
+            pin_memory=device.type == "cuda",
+            drop_last=False,
+            prefetch_factor=2 if cfg.validation.num_workers > 0 else None,
+        )
 
     accelerator.wait_for_everyone()
-    value_model, optimizer, dataloader, lr_scheduler = accelerator.prepare(
-        value_model, optimizer, dataloader, lr_scheduler
-    )
+    if validation_dataloader is None:
+        value_model, optimizer, dataloader, lr_scheduler = accelerator.prepare(
+            value_model, optimizer, dataloader, lr_scheduler
+        )
+    else:
+        value_model, optimizer, dataloader, validation_dataloader, lr_scheduler = accelerator.prepare(
+            value_model, optimizer, dataloader, validation_dataloader, lr_scheduler
+        )
     dl_iter = cycle(dataloader)
 
     value_model.train()
@@ -241,6 +352,25 @@ def value_train(
         logging.info(
             f"Start value training on a fixed dataset, with effective batch size: {effective_batch_size}"
         )
+
+    if validation_dataloader is not None and cfg.validation.run_at_start and step == 0:
+        validation_metrics = evaluate_value_model(
+            value_model,
+            validation_dataloader,
+            validation_target_raw_batch_hook,
+            preprocessor,
+            accelerator,
+            step,
+        )
+        if is_main_process:
+            logging.info(
+                "Validation at step %d | loss=%.6f value_mae=%.6f",
+                step,
+                validation_metrics["loss"],
+                validation_metrics["value_mae"],
+            )
+            if wandb_logger:
+                wandb_logger.log_dict(validation_metrics, step, mode="eval")
 
     logged_first_prompt = False
 
@@ -279,6 +409,10 @@ def value_train(
         train_tracker.step()
         is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0 and is_main_process
         is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
+        is_validation_step = (
+            validation_dataloader is not None
+            and (step % cfg.validation.freq == 0 or step == cfg.steps)
+        )
 
         if is_log_step:
             logging.info(train_tracker)
@@ -288,6 +422,25 @@ def value_train(
                     wandb_log_dict.update(output_dict)
                 wandb_logger.log_dict(wandb_log_dict, step)
             train_tracker.reset_averages()
+
+        if is_validation_step:
+            validation_metrics = evaluate_value_model(
+                value_model,
+                validation_dataloader,
+                validation_target_raw_batch_hook,
+                preprocessor,
+                accelerator,
+                step,
+            )
+            if is_main_process:
+                logging.info(
+                    "Validation at step %d | loss=%.6f value_mae=%.6f",
+                    step,
+                    validation_metrics["loss"],
+                    validation_metrics["value_mae"],
+                )
+                if wandb_logger:
+                    wandb_logger.log_dict(validation_metrics, step, mode="eval")
 
         if cfg.save_checkpoint and is_saving_step:
             if is_main_process:
