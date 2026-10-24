@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import logging
+import math
 import time
 from contextlib import nullcontext
 from copy import deepcopy
@@ -112,7 +113,7 @@ def evaluate_value_model(
     accelerator: Accelerator,
     step: int,
 ) -> dict[str, float]:
-    """Evaluate frame-weighted loss and MAE on a deterministic held-out loader."""
+    """Evaluate frame-weighted loss, error, and correlation on a held-out loader."""
     policy.eval()
     gathered_metrics = []
     try:
@@ -131,9 +132,15 @@ def evaluate_value_model(
             value_mae = float(output_dict["value_mae"])
             # Expanding each batch mean lets gather_for_metrics remove any
             # distributed-loader padding while preserving frame weighting.
-            local = torch.empty((batch_size, 2), device=accelerator.device, dtype=torch.float64)
+            local = torch.empty((batch_size, 8), device=accelerator.device, dtype=torch.float64)
             local[:, 0] = loss.detach().to(dtype=torch.float64)
             local[:, 1] = value_mae
+            local[:, 2] = float(output_dict["value_mse"])
+            local[:, 3] = float(output_dict["pred_value_mean"])
+            local[:, 4] = float(output_dict["target_value_mean"])
+            local[:, 5] = float(output_dict["pred_value_square_mean"])
+            local[:, 6] = float(output_dict["target_value_square_mean"])
+            local[:, 7] = float(output_dict["pred_target_product_mean"])
             gathered_metrics.append(accelerator.gather_for_metrics(local).cpu())
     finally:
         policy.train()
@@ -141,7 +148,16 @@ def evaluate_value_model(
     if not gathered_metrics:
         raise RuntimeError("Validation dataloader produced no batches.")
     metrics = torch.cat(gathered_metrics, dim=0).mean(dim=0)
-    return {"loss": float(metrics[0]), "value_mae": float(metrics[1])}
+    pred_variance = max(0.0, float(metrics[5] - metrics[3].square()))
+    target_variance = max(0.0, float(metrics[6] - metrics[4].square()))
+    denominator = math.sqrt(pred_variance * target_variance)
+    correlation = float((metrics[7] - metrics[3] * metrics[4]) / denominator) if denominator > 0 else 0.0
+    return {
+        "loss": float(metrics[0]),
+        "value_mae": float(metrics[1]),
+        "value_rmse": math.sqrt(max(0.0, float(metrics[2]))),
+        "value_correlation": correlation,
+    }
 
 
 @parser.wrap()
@@ -364,10 +380,12 @@ def value_train(
         )
         if is_main_process:
             logging.info(
-                "Validation at step %d | loss=%.6f value_mae=%.6f",
+                "Validation at step %d | loss=%.6f value_mae=%.6f value_rmse=%.6f correlation=%.6f",
                 step,
                 validation_metrics["loss"],
                 validation_metrics["value_mae"],
+                validation_metrics["value_rmse"],
+                validation_metrics["value_correlation"],
             )
             if wandb_logger:
                 wandb_logger.log_dict(validation_metrics, step, mode="eval")
@@ -409,9 +427,8 @@ def value_train(
         train_tracker.step()
         is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0 and is_main_process
         is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
-        is_validation_step = (
-            validation_dataloader is not None
-            and (step % cfg.validation.freq == 0 or step == cfg.steps)
+        is_validation_step = validation_dataloader is not None and (
+            step % cfg.validation.freq == 0 or step == cfg.steps
         )
 
         if is_log_step:
@@ -434,10 +451,12 @@ def value_train(
             )
             if is_main_process:
                 logging.info(
-                    "Validation at step %d | loss=%.6f value_mae=%.6f",
+                    "Validation at step %d | loss=%.6f value_mae=%.6f value_rmse=%.6f correlation=%.6f",
                     step,
                     validation_metrics["loss"],
                     validation_metrics["value_mae"],
+                    validation_metrics["value_rmse"],
+                    validation_metrics["value_correlation"],
                 )
                 if wandb_logger:
                     wandb_logger.log_dict(validation_metrics, step, mode="eval")

@@ -91,3 +91,38 @@ compatibility. It is not equivalent to Evo-RL's selective SFT mixture: original
 demonstrations, selected successful autonomous segments, and contiguous human
 correction segments must still be sampled as separate sources when performing
 the subsequent policy update.
+
+## Historical visual context for Pistar06
+
+Pistar06 can optionally estimate value from past observations in addition to the
+current image. Frame offsets are expressed in dataset frames; the current frame
+is always appended automatically. For a 25 FPS dataset, the following setting
+uses images from 1.0 seconds ago, 0.48 seconds ago, and now:
+
+```bash
+lerobot-value-train \
+  --dataset.repo_id=<VALUE_DATASET_ID> \
+  --dataset.root=<VALUE_DATASET_ROOT> \
+  --value.path=<SINGLE_FRAME_CHECKPOINT>/pretrained_model \
+  --value.history_frame_offsets='[-25,-12]' \
+  <OTHER_VALUE_TRAIN_ARGS>
+```
+
+The image encoder is shared across time. Camera features are pooled per frame,
+then a temporal Transformer with learned time positions fuses the sequence.
+Episode-boundary padding is represented by a learned missing-history token, so
+an episode start is distinguishable from a visually similar terminal state.
+A zero-initialized residual gate makes the initial historical model exactly
+match the supplied single-frame checkpoint before optimization.
+
+For a controlled ablation, run both arms from the same checkpoint with identical
+data, split, update count, and optimizer settings:
+
+```bash
+scripts/train_value_history_ablation.sh control --dry-run
+scripts/train_value_history_ablation.sh history2 --dry-run
+```
+
+Remove `--dry-run` only after reviewing the commands. Compare held-out MAE,
+RMSE, Pearson correlation, and the observation-aliasing diagnostic rather than
+selecting a checkpoint only by distributional cross-entropy.

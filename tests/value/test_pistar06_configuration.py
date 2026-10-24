@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+import pytest
+
 from lerobot.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
 from lerobot.policies.factory import make_policy_config
 from lerobot.values.pistar06.configuration_pistar06 import Pistar06Config
@@ -34,3 +36,22 @@ def test_pistar06_preset_uses_cosine_decay_with_warmup():
     assert scheduler_cfg.decay_lr == cfg.scheduler_decay_lr
     assert scheduler_cfg.num_warmup_steps == cfg.scheduler_warmup_steps
     assert scheduler_cfg.num_decay_steps == cfg.scheduler_decay_steps
+
+
+def test_pistar06_history_offsets_define_observation_window():
+    cfg = Pistar06Config(history_frame_offsets=[-25, -12])
+    assert cfg.observation_delta_indices == [-25, -12, 0]
+    assert cfg.n_obs_steps == 3
+
+
+@pytest.mark.parametrize(
+    "offsets,match",
+    [
+        ([0], "negative"),
+        ([-12, -25], "strictly increasing"),
+        ([-12, -12], "strictly increasing"),
+    ],
+)
+def test_pistar06_rejects_invalid_history_offsets(offsets, match):
+    with pytest.raises(ValueError, match=match):
+        Pistar06Config(history_frame_offsets=offsets)

@@ -122,6 +122,7 @@ def hf_stubs(monkeypatch):
     monkeypatch.setattr(tokenizer_processor, "AutoTokenizer", _DummyTokenizer)
     monkeypatch.setattr(pistar06_modeling, "AutoImageProcessor", _DummyImageProcessor)
     monkeypatch.setattr(pistar06_modeling, "AutoModel", _DummyAutoModel)
+    monkeypatch.setattr(pistar06_modeling, "SiglipVisionModel", _DummyAutoModel)
     monkeypatch.setattr(pistar06_modeling, "AutoModelForCausalLM", _DummyAutoModelForCausalLM)
     monkeypatch.setattr(pistar06_modeling, "AutoConfig", _DummyAutoConfig)
 
@@ -180,6 +181,29 @@ def test_pistar06_processor_pads_missing_cameras_and_tokenizes(hf_stubs):
     assert torch.equal(processed[PISTAR06_IMAGE_MASK_KEY][:, 1], torch.zeros(2, dtype=torch.bool))
 
 
+def test_pistar06_processor_preserves_temporal_frames_and_padding(hf_stubs):
+    del hf_stubs
+    cfg = Pistar06Config(
+        device="cpu",
+        mode="vision_only",
+        camera_features=["observation.images.front"],
+        history_frame_offsets=[-25, -12],
+    )
+    preprocessor, _ = make_pistar06_pre_post_processors(cfg)
+    raw_batch = {
+        "observation.images.front": torch.rand(2, 3, 3, 48, 40),
+        "observation.images.front_is_pad": torch.tensor(
+            [[True, False, False], [False, False, False]], dtype=torch.bool
+        ),
+    }
+
+    processed = preprocessor(raw_batch)
+    assert processed[PISTAR06_IMAGES_KEY].shape == (2, 3, 1, 3, 48, 40)
+    assert processed[PISTAR06_IMAGE_MASK_KEY].shape == (2, 3, 1)
+    assert not processed[PISTAR06_IMAGE_MASK_KEY][0, 0, 0]
+    assert processed[PISTAR06_IMAGE_MASK_KEY][0, 1:, 0].all()
+
+
 def test_pistar06_processor_requires_task_field(hf_stubs):
     del hf_stubs
     cfg = Pistar06Config(device="cpu", camera_features=["observation.images.front"])
@@ -225,6 +249,30 @@ def test_pistar06_model_forward(hf_stubs):
         image_attention_mask=torch.ones(3, 1, dtype=torch.bool),
     )
     assert outputs.shape == (3, 17)
+
+
+def test_pistar06_model_forward_with_history_and_missing_frame(hf_stubs):
+    del hf_stubs
+    cfg = Pistar06Config(
+        device="cpu",
+        mode="vision_only",
+        camera_features=["observation.images.front"],
+        history_frame_offsets=[-25, -12],
+        fusion_hidden_dim=32,
+        fusion_num_heads=8,
+        fusion_num_layers=1,
+        num_bins=17,
+        dropout=0.0,
+    )
+    model = Pistar06Model(cfg).eval()
+    outputs = model(
+        images=torch.rand(2, 3, 1, 3, 32, 32),
+        image_attention_mask=torch.tensor(
+            [[[False], [True], [True]], [[True], [True], [True]]], dtype=torch.bool
+        ),
+    )
+    assert outputs.shape == (2, 17)
+    assert model.temporal_residual_gate.item() == 0.0
 
 
 def test_pistar06_policy_requires_valid_camera_mask(hf_stubs):

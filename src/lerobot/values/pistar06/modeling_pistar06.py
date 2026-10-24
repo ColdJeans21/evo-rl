@@ -311,6 +311,32 @@ class Pistar06Model(nn.Module):
             nn.GELU(),
             nn.Dropout(cfg.dropout),
         )
+        if cfg.history_frame_offsets:
+            num_observation_frames = len(cfg.history_frame_offsets) + 1
+            self.temporal_position_embedding = nn.Parameter(
+                torch.empty(num_observation_frames, cfg.fusion_hidden_dim)
+            )
+            self.temporal_missing_embedding = nn.Parameter(torch.empty(cfg.fusion_hidden_dim))
+            temporal_layer = nn.TransformerEncoderLayer(
+                d_model=cfg.fusion_hidden_dim,
+                nhead=cfg.fusion_num_heads,
+                dim_feedforward=cfg.fusion_hidden_dim * 4,
+                dropout=cfg.dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            self.temporal_encoder = nn.TransformerEncoder(
+                temporal_layer,
+                num_layers=cfg.fusion_num_layers,
+                enable_nested_tensor=False,
+            )
+            # A zero gate makes initialization from a single-frame checkpoint
+            # exactly reproduce the current-frame representation. Training then
+            # learns how much temporal context to admit.
+            self.temporal_residual_gate = nn.Parameter(torch.zeros(()))
+            nn.init.normal_(self.temporal_position_embedding, std=0.02)
+            nn.init.normal_(self.temporal_missing_embedding, std=0.02)
         head_input_dim = cfg.fusion_hidden_dim
         if cfg.mode == "vision_language":
             language_hidden_size = _extract_hidden_size(self.language_model)
@@ -364,20 +390,27 @@ class Pistar06Model(nn.Module):
         return (hidden * token_mask).sum(dim=1) / denom
 
     def _preprocess_images(self, images: Tensor, image_attention_mask: Tensor) -> Tensor:
-        if images.ndim != 5:
-            raise ValueError(f"'images' must have shape [B,N,C,H,W], got {tuple(images.shape)}.")
-        if image_attention_mask.ndim != 2:
+        if images.ndim == 5:
+            images = images.unsqueeze(1)
+        elif images.ndim != 6:
             raise ValueError(
-                f"'image_attention_mask' must have shape [B,N], got {tuple(image_attention_mask.shape)}."
+                f"'images' must have shape [B,N,C,H,W] or [B,T,N,C,H,W], got {tuple(images.shape)}."
+            )
+        if image_attention_mask.ndim == 2:
+            image_attention_mask = image_attention_mask.unsqueeze(1)
+        elif image_attention_mask.ndim != 3:
+            raise ValueError(
+                "'image_attention_mask' must have shape [B,N] or [B,T,N], "
+                f"got {tuple(image_attention_mask.shape)}."
             )
 
-        bsize, num_cameras = images.shape[:2]
-        if image_attention_mask.shape[0] != bsize or image_attention_mask.shape[1] != num_cameras:
+        bsize, time_steps, num_cameras = images.shape[:3]
+        if tuple(image_attention_mask.shape) != (bsize, time_steps, num_cameras):
             raise ValueError("Batch shape mismatch between images and image_attention_mask.")
 
         if self.cfg.mode == "vision_only":
             # Missing cameras must not influence detection of the input pixel range.
-            images = torch.where(image_attention_mask[:, :, None, None, None], images, 0)
+            images = torch.where(image_attention_mask[:, :, :, None, None, None], images, 0)
 
         if images.dtype == torch.uint8:
             images = images.to(dtype=torch.float32) / 255.0
@@ -386,7 +419,7 @@ class Pistar06Model(nn.Module):
             if bool(torch.max(images) > 1.0) or bool(torch.min(images) < 0.0):
                 images = (images / 255.0).clamp(0.0, 1.0)
 
-        flat_images = images.view(bsize * num_cameras, *images.shape[2:])
+        flat_images = images.reshape(bsize * time_steps * num_cameras, *images.shape[3:])
         if flat_images.shape[-2:] != self.image_resolution:
             flat_images = functional.interpolate(
                 flat_images,
@@ -400,6 +433,7 @@ class Pistar06Model(nn.Module):
         flat_images = (flat_images - mean) / std
         flat_images = flat_images.view(
             bsize,
+            time_steps,
             num_cameras,
             flat_images.shape[1],
             flat_images.shape[2],
@@ -407,7 +441,7 @@ class Pistar06Model(nn.Module):
         )
 
         camera_mask = image_attention_mask.to(device=flat_images.device, dtype=flat_images.dtype).view(
-            bsize, num_cameras, 1, 1, 1
+            bsize, time_steps, num_cameras, 1, 1, 1
         )
         flat_images = flat_images * camera_mask
         return flat_images
@@ -419,16 +453,22 @@ class Pistar06Model(nn.Module):
         images: Tensor | None = None,
         image_attention_mask: Tensor | None = None,
     ) -> Tensor:
-        if images is None or images.ndim != 5:
-            raise ValueError("'images' must have shape [B, N, C, H, W].")
-        bsize, num_cameras = images.shape[:2]
+        if images is None or images.ndim not in {5, 6}:
+            raise ValueError("'images' must have shape [B,N,C,H,W] or [B,T,N,C,H,W].")
+        bsize = images.shape[0]
+        time_steps = 1 if images.ndim == 5 else images.shape[1]
+        num_cameras = images.shape[1] if images.ndim == 5 else images.shape[2]
         if num_cameras == 0:
             raise ValueError("At least one camera is required for Pistar06Model.")
-        if image_attention_mask is None or tuple(image_attention_mask.shape) != (bsize, num_cameras):
-            raise ValueError("'image_attention_mask' must have shape [B, N].")
+        expected_mask_shape = (bsize, num_cameras) if images.ndim == 5 else (bsize, time_steps, num_cameras)
+        if image_attention_mask is None or tuple(image_attention_mask.shape) != expected_mask_shape:
+            raise ValueError(
+                "'image_attention_mask' must match the leading [B,N] or [B,T,N] image dimensions."
+            )
         image_attention_mask = image_attention_mask.to(dtype=torch.bool, device=images.device)
-        if not torch.all(image_attention_mask.any(dim=1)):
-            raise ValueError("Each sample must have at least one valid camera input.")
+        current_camera_mask = image_attention_mask if images.ndim == 5 else image_attention_mask[:, -1]
+        if not torch.all(current_camera_mask.any(dim=1)):
+            raise ValueError("Each sample must have at least one valid camera in the current frame.")
         if self.cfg.mode == "vision_language":
             if input_ids is None or attention_mask is None:
                 raise ValueError("vision_language requires input_ids and attention_mask.")
@@ -439,8 +479,13 @@ class Pistar06Model(nn.Module):
                 raise ValueError("Each sample must have at least one valid language token.")
 
         processed_images = self._preprocess_images(images, image_attention_mask)
-        num_cameras = processed_images.shape[1]
-        flat_images = processed_images.reshape(bsize * num_cameras, *processed_images.shape[2:])
+        _, time_steps, num_cameras = processed_images.shape[:3]
+        expected_time_steps = len(self.cfg.history_frame_offsets) + 1
+        if time_steps != expected_time_steps:
+            raise ValueError(
+                f"Expected {expected_time_steps} observation frames from history_frame_offsets, got {time_steps}."
+            )
+        flat_images = processed_images.reshape(bsize * time_steps * num_cameras, *processed_images.shape[3:])
         flat_images = flat_images.to(dtype=self.model_dtype)
 
         image_context = torch.no_grad() if self.cfg.freeze_vision_encoder else nullcontext()
@@ -457,14 +502,27 @@ class Pistar06Model(nn.Module):
         feature_dtype = torch.float32
         image_features = image_features.to(dtype=feature_dtype)
 
-        image_tokens = self.image_projector(image_features).view(bsize, num_cameras, -1)
+        image_tokens = self.image_projector(image_features).view(bsize, time_steps, num_cameras, -1)
+        if image_attention_mask.ndim == 2:
+            image_attention_mask = image_attention_mask.unsqueeze(1)
         camera_token_mask = image_attention_mask.unsqueeze(-1).to(dtype=image_tokens.dtype)
         image_tokens = image_tokens * camera_token_mask
 
         camera_denominator = (
-            image_attention_mask.sum(dim=1, keepdim=True).to(dtype=image_tokens.dtype).clamp_min(1.0)
+            image_attention_mask.sum(dim=2, keepdim=True).to(dtype=image_tokens.dtype).clamp_min(1.0)
         )
-        image_pooled = image_tokens.sum(dim=1) / camera_denominator
+        temporal_tokens = image_tokens.sum(dim=2) / camera_denominator
+        current_image = temporal_tokens[:, -1]
+        if self.cfg.history_frame_offsets:
+            temporal_valid = image_attention_mask.any(dim=2)
+            missing = self.temporal_missing_embedding.view(1, 1, -1)
+            temporal_tokens = torch.where(temporal_valid.unsqueeze(-1), temporal_tokens, missing)
+            temporal_tokens = temporal_tokens + self.temporal_position_embedding.unsqueeze(0)
+            temporal_context = self.temporal_encoder(temporal_tokens)[:, -1]
+            gate = torch.tanh(self.temporal_residual_gate)
+            image_pooled = current_image + gate * (temporal_context - current_image)
+        else:
+            image_pooled = current_image
         if self.cfg.mode == "vision_only":
             return self.value_head(self.final_norm(image_pooled))
 
@@ -804,6 +862,7 @@ class Pistar06Policy(PreTrainedPolicy):
 
         pred_value = expected_value_from_logits(logits, bin_centers)
         value_mae = (pred_value - value_target).abs().mean()
+        value_mse = ((pred_value - value_target) ** 2).mean()
 
         loss = per_sample_loss if reduction == "none" else per_sample_loss.mean()
 
@@ -812,6 +871,12 @@ class Pistar06Policy(PreTrainedPolicy):
             if reduction == "none"
             else float(loss.detach().item()),
             "value_mae": float(value_mae.detach().item()),
+            "value_mse": float(value_mse.detach().item()),
+            "pred_value_mean": float(pred_value.detach().mean().item()),
+            "target_value_mean": float(value_target.detach().mean().item()),
+            "pred_value_square_mean": float(pred_value.detach().square().mean().item()),
+            "target_value_square_mean": float(value_target.detach().square().mean().item()),
+            "pred_target_product_mean": float((pred_value.detach() * value_target.detach()).mean().item()),
         }
         if sample_weight is not None:
             loss_dict["loss_weight_mean"] = float(sample_weight.mean().detach().item())

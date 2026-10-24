@@ -139,21 +139,26 @@ class Pistar06PrepareImagesProcessorStep(ProcessorStep):
         }
 
     @staticmethod
-    def _to_bchw(img_batch: Tensor) -> Tensor:
-        if img_batch.ndim != 4:
-            raise ValueError(f"Expected image batch rank 4, got shape {tuple(img_batch.shape)}.")
-
-        if img_batch.shape[1] in {1, 3}:  # [B,C,H,W]
-            return img_batch
-        if img_batch.shape[-1] in {1, 3}:  # [B,H,W,C]
-            return img_batch.permute(0, 3, 1, 2)
+    def _to_btchw(img_batch: Tensor) -> tuple[Tensor, bool]:
+        """Return [B,T,C,H,W] plus whether a temporal axis was present."""
+        if img_batch.ndim == 4:
+            if img_batch.shape[1] in {1, 3}:  # [B,C,H,W]
+                return img_batch.unsqueeze(1), False
+            if img_batch.shape[-1] in {1, 3}:  # [B,H,W,C]
+                return img_batch.permute(0, 3, 1, 2).unsqueeze(1), False
+        elif img_batch.ndim == 5:
+            if img_batch.shape[2] in {1, 3}:  # [B,T,C,H,W]
+                return img_batch, True
+            if img_batch.shape[-1] in {1, 3}:  # [B,T,H,W,C]
+                return img_batch.permute(0, 1, 4, 2, 3), True
         raise ValueError(
-            "Camera tensor must be channels-first or channels-last. "
+            "Camera tensor must be [B,C,H,W], [B,H,W,C], [B,T,C,H,W], or [B,T,H,W,C]. "
             f"Got camera batch with shape={tuple(img_batch.shape)}."
         )
 
-    def _process_camera_batch(self, img_batch: Tensor) -> Tensor:
-        return self._to_bchw(img_batch).detach().to(dtype=torch.float32)
+    def _process_camera_batch(self, img_batch: Tensor) -> tuple[Tensor, bool]:
+        images, temporal = self._to_btchw(img_batch)
+        return images.detach().to(dtype=torch.float32), temporal
 
     def _prepare_images(self, observation: dict[str, Any]) -> tuple[Tensor, Tensor]:
         present_img_keys = [key for key in self.camera_features if key in observation]
@@ -163,31 +168,50 @@ class Pistar06PrepareImagesProcessorStep(ProcessorStep):
                 f"expected={self.camera_features} batch_keys={list(observation.keys())}"
             )
 
-        reference_img = self._process_camera_batch(torch.as_tensor(observation[present_img_keys[0]]))
-        bsize = reference_img.shape[0]
+        reference_img, has_temporal_axis = self._process_camera_batch(
+            torch.as_tensor(observation[present_img_keys[0]])
+        )
+        bsize, time_steps = reference_img.shape[:2]
         image_tensors: list[Tensor] = []
         image_masks: list[Tensor] = []
 
         for key in self.camera_features:
             if key in observation:
-                img = self._process_camera_batch(torch.as_tensor(observation[key]))
+                img, camera_has_temporal_axis = self._process_camera_batch(torch.as_tensor(observation[key]))
+                if camera_has_temporal_axis != has_temporal_axis:
+                    raise ValueError("All cameras must either include or omit a temporal axis.")
                 if img.shape[0] != bsize:
                     raise ValueError(
                         f"Mismatched batch size across cameras. Camera '{key}' has {img.shape[0]}, expected {bsize}."
                     )
                 if img.shape[1:] != reference_img.shape[1:]:
                     raise ValueError(
-                        "Camera tensors must share the same [C,H,W] shape before model preprocessing. "
+                        "Camera tensors must share the same [T,C,H,W] shape before model preprocessing. "
                         f"Camera '{key}' has {tuple(img.shape[1:])}, expected {tuple(reference_img.shape[1:])}."
                     )
                 image_tensors.append(img)
-                image_masks.append(torch.ones(bsize, dtype=torch.bool))
+                pad_key = f"{key}_is_pad"
+                if pad_key in observation:
+                    is_pad = torch.as_tensor(observation[pad_key], dtype=torch.bool)
+                    if is_pad.ndim == 1:
+                        is_pad = is_pad.unsqueeze(1)
+                    if tuple(is_pad.shape) != (bsize, time_steps):
+                        raise ValueError(
+                            f"Camera padding mask '{pad_key}' must have shape {(bsize, time_steps)}, "
+                            f"got {tuple(is_pad.shape)}."
+                        )
+                    image_masks.append(~is_pad)
+                else:
+                    image_masks.append(torch.ones((bsize, time_steps), dtype=torch.bool))
             else:
                 image_tensors.append(torch.zeros_like(reference_img))
-                image_masks.append(torch.zeros(bsize, dtype=torch.bool))
+                image_masks.append(torch.zeros((bsize, time_steps), dtype=torch.bool))
 
-        images = torch.stack(image_tensors, dim=1)
-        masks = torch.stack(image_masks, dim=1)
+        images = torch.stack(image_tensors, dim=2)
+        masks = torch.stack(image_masks, dim=2)
+        if not has_temporal_axis:
+            images = images.squeeze(1)
+            masks = masks.squeeze(1)
         return images, masks
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:

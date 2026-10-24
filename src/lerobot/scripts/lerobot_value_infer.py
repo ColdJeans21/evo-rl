@@ -33,7 +33,8 @@ from lerobot.configs import parser
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.value import ValueInferencePipelineConfig
 from lerobot.configs.value_reward import ValueRewardConfig
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.factory import resolve_delta_timestamps
+from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.datasets.utils import load_info, write_info
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.scripts.value_infer_viz import (
@@ -133,13 +134,18 @@ def _resolve_pretrained_model_dir(checkpoint_path: str, checkpoint_ref: str) -> 
     )
 
 
-def _load_dataset_distributed(cfg: ValueInferencePipelineConfig, accelerator: Accelerator) -> LeRobotDataset:
+def _load_dataset_distributed(
+    cfg: ValueInferencePipelineConfig,
+    accelerator: Accelerator,
+    delta_timestamps: dict[str, list[float]] | None = None,
+) -> LeRobotDataset:
     dataset_kwargs = {
         "repo_id": cfg.dataset.repo_id,
         "root": cfg.dataset.root,
         "episodes": cfg.dataset.episodes,
         "revision": cfg.dataset.revision,
         "download_videos": cfg.dataset.download_videos,
+        "delta_timestamps": delta_timestamps,
     }
 
     if accelerator.is_main_process:
@@ -465,7 +471,30 @@ def run_value_inference_pipeline(
     accelerator = _create_accelerator(cfg, accelerator)
     output_dir, device = _init_runtime(cfg, accelerator)
 
-    dataset = _load_dataset_distributed(cfg, accelerator)
+    pretrained_dir = None
+    delta_timestamps = None
+    if cfg.acp.enable:
+        pretrained_dir = _resolve_pretrained_model_dir(
+            checkpoint_path=cfg.inference.checkpoint_path,
+            checkpoint_ref=cfg.inference.checkpoint_ref,
+        )
+        checkpoint_cfg = PreTrainedConfig.from_pretrained(pretrained_dir)
+        if not isinstance(checkpoint_cfg, Pistar06Config):
+            raise ValueError(
+                f"Unsupported value config type '{type(checkpoint_cfg)}'. "
+                "lerobot-value-infer currently supports only 'pistar06'."
+            )
+        dataset_meta = LeRobotDatasetMetadata(
+            cfg.dataset.repo_id,
+            root=cfg.dataset.root,
+            revision=cfg.dataset.revision,
+        )
+        delta_timestamps = resolve_delta_timestamps(checkpoint_cfg, dataset_meta)
+
+    if delta_timestamps is None:
+        dataset = _load_dataset_distributed(cfg, accelerator)
+    else:
+        dataset = _load_dataset_distributed(cfg, accelerator, delta_timestamps=delta_timestamps)
     raw_frames = dataset.hf_dataset.with_format(None)
     frame_count = len(raw_frames)
     if frame_count == 0:
@@ -509,10 +538,8 @@ def run_value_inference_pipeline(
         accelerator.end_training()
         return result
 
-    pretrained_dir = _resolve_pretrained_model_dir(
-        checkpoint_path=cfg.inference.checkpoint_path,
-        checkpoint_ref=cfg.inference.checkpoint_ref,
-    )
+    if pretrained_dir is None:
+        raise RuntimeError("Value checkpoint was not resolved while ACP inference is enabled.")
     value_policy, value_cfg, preprocessor = _load_value_policy_and_processors(
         cfg=cfg,
         dataset=dataset,

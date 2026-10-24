@@ -44,6 +44,13 @@ class Pistar06Config(PreTrainedConfig):
     fusion_num_layers: int = 2
     fusion_num_heads: int = 8
 
+    # Temporal observation context. Offsets are expressed in dataset frames and
+    # must be strictly increasing negative integers; the current frame (0) is
+    # appended automatically. An empty list preserves legacy single-frame
+    # checkpoints exactly.
+    history_frame_offsets: list[int] = field(default_factory=list)
+    temporal_fusion: str = "transformer"
+
     # Value head (distributional)
     num_bins: int = 201
     bin_min: float = -1.0
@@ -113,6 +120,17 @@ class Pistar06Config(PreTrainedConfig):
             raise ValueError("'value.fusion_num_heads' must be > 0.")
         if self.fusion_hidden_dim % self.fusion_num_heads != 0:
             raise ValueError("'value.fusion_hidden_dim' must be divisible by 'value.fusion_num_heads'.")
+        if self.temporal_fusion != "transformer":
+            raise ValueError("'value.temporal_fusion' currently supports only 'transformer'.")
+        if any(
+            not isinstance(offset, int) or isinstance(offset, bool) for offset in self.history_frame_offsets
+        ):
+            raise ValueError("'value.history_frame_offsets' must contain only integer frame offsets.")
+        if any(offset >= 0 for offset in self.history_frame_offsets):
+            raise ValueError("'value.history_frame_offsets' must contain only negative offsets.")
+        if self.history_frame_offsets != sorted(set(self.history_frame_offsets)):
+            raise ValueError("'value.history_frame_offsets' must be strictly increasing without duplicates.")
+        self.n_obs_steps = len(self.history_frame_offsets) + 1
 
         if self.num_bins < 2:
             raise ValueError("'value.num_bins' must be >= 2.")
@@ -157,8 +175,10 @@ class Pistar06Config(PreTrainedConfig):
         )
 
     @property
-    def observation_delta_indices(self) -> None:
-        return None
+    def observation_delta_indices(self) -> list[int] | None:
+        if not self.history_frame_offsets:
+            return None
+        return [*self.history_frame_offsets, 0]
 
     @property
     def action_delta_indices(self) -> None:
