@@ -9,7 +9,6 @@ from lerobot.processor import RobotAction
 from ..teleoperator import Teleoperator
 from .config_spacemouse import SpaceMouseTeleopConfig
 
-
 AXES = ("target_x", "target_y", "target_z", "target_wx", "target_wy", "target_wz")
 
 
@@ -36,7 +35,7 @@ class SpaceMouseTeleop(Teleoperator):
 
     @property
     def action_features(self) -> dict[str, type]:
-        return {"enabled": bool, **{axis: float for axis in AXES}, "gripper_vel": float}
+        return {"enabled": bool, **dict.fromkeys(AXES, float), "gripper_vel": float}
 
     @property
     def feedback_features(self) -> dict[str, type]:
@@ -72,7 +71,7 @@ class SpaceMouseTeleop(Teleoperator):
             if next_state is None:
                 break
             state = next_state
-        values = {axis: 0.0 for axis in AXES}
+        values = dict.fromkeys(AXES, 0.0)
         now = time.perf_counter()
         stale = (
             state is None
@@ -97,10 +96,16 @@ class SpaceMouseTeleop(Teleoperator):
         if self.config.use_gripper:
             if self.config.gripper_open_button is not None and self.config.gripper_open_button < len(buttons):
                 gripper += float(bool(buttons[self.config.gripper_open_button]))
-            if self.config.gripper_close_button is not None and self.config.gripper_close_button < len(buttons):
+            if self.config.gripper_close_button is not None and self.config.gripper_close_button < len(
+                buttons
+            ):
                 gripper -= float(bool(buttons[self.config.gripper_close_button]))
         if self.config.require_enable_button:
-            enabled = self.config.enable_button is not None and self.config.enable_button < len(buttons) and bool(buttons[self.config.enable_button])
+            enabled = (
+                self.config.enable_button is not None
+                and self.config.enable_button < len(buttons)
+                and bool(buttons[self.config.enable_button])
+            )
         else:
             enabled = self.config.idle_enabled or any(values.values()) or bool(gripper)
         return {"enabled": enabled, **values, "gripper_vel": gripper}

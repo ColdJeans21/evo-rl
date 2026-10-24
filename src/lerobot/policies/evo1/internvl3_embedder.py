@@ -3,8 +3,8 @@ import logging
 
 import torch
 import torch.nn as nn
-import torchvision.transforms as T
-import torchvision.transforms.functional as TF
+import torchvision.transforms as transforms
+import torchvision.transforms.functional as transform_functional
 from PIL import Image
 from torchvision.transforms.functional import InterpolationMode, to_pil_image
 from transformers import AutoModel, AutoTokenizer
@@ -18,12 +18,12 @@ IMG_END_TOKEN = "</img>"  # nosec B105
 
 # === Image Transformations ===
 def build_transform(input_size):
-    return T.Compose(
+    return transforms.Compose(
         [
-            T.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
-            T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
-            T.ToTensor(),
-            T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            transforms.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
+            transforms.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ]
     )
 
@@ -174,13 +174,13 @@ class InternVL3Embedder(nn.Module):
                 self.gradient_checkpointing_use_reentrant,
             )
         else:
-            logging.warning("Requested InternVL3 gradient checkpointing, but no checkpointable module was found.")
+            logging.warning(
+                "Requested InternVL3 gradient checkpointing, but no checkpointable module was found."
+            )
 
-    def _dynamic_preprocess_tensor(
-        self, image_t, min_num=1, max_num=1, use_thumbnail=False
-    ):
+    def _dynamic_preprocess_tensor(self, image_t, min_num=1, max_num=1, use_thumbnail=False):
         # image_t shape expected: [C, H, W]
-        C, orig_height, orig_width = image_t.shape
+        channels, orig_height, orig_width = image_t.shape
 
         # get ratio by cache
         target_aspect_ratio = get_target_aspect_ratio(
@@ -194,7 +194,7 @@ class InternVL3Embedder(nn.Module):
 
         # Resize on GPU
         # image_t expected shape for interpolate is [C, H, W] mapping to size
-        resized_img = TF.resize(
+        resized_img = transform_functional.resize(
             image_t,
             size=[target_height, target_width],
             interpolation=InterpolationMode.BICUBIC,
@@ -204,14 +204,14 @@ class InternVL3Embedder(nn.Module):
         # Eliminate the for-loop using view and permute for zero-copy strided tensor tiling
         # resized_img shape: [C, ratio_h * image_size, ratio_w * image_size]
         # 1. view to -> [C, ratio_h, image_size, ratio_w, image_size]
-        reshaped = resized_img.view(C, ratio_h, self.image_size, ratio_w, self.image_size)
+        reshaped = resized_img.view(channels, ratio_h, self.image_size, ratio_w, self.image_size)
         # 2. permute to -> [ratio_h, ratio_w, C, image_size, image_size]
         permuted = reshaped.permute(1, 3, 0, 2, 4)
         # 3. reshape to -> [blocks, C, image_size, image_size]
-        stacked_tiles = permuted.reshape(blocks, C, self.image_size, self.image_size)
+        stacked_tiles = permuted.reshape(blocks, channels, self.image_size, self.image_size)
 
         if use_thumbnail and blocks != 1:
-            thumbnail_img = TF.resize(
+            thumbnail_img = transform_functional.resize(
                 image_t,
                 size=[self.image_size, self.image_size],
                 interpolation=InterpolationMode.BICUBIC,
@@ -228,12 +228,8 @@ class InternVL3Embedder(nn.Module):
         pixel_values_list = []
         batch_num_tiles_list = []
         model_dtype = next(self.model.parameters()).dtype
-        mean = torch.tensor(IMAGENET_MEAN, device=self.device, dtype=torch.float32).view(
-            1, 3, 1, 1
-        )
-        std = torch.tensor(IMAGENET_STD, device=self.device, dtype=torch.float32).view(
-            1, 3, 1, 1
-        )
+        mean = torch.tensor(IMAGENET_MEAN, device=self.device, dtype=torch.float32).view(1, 3, 1, 1)
+        std = torch.tensor(IMAGENET_STD, device=self.device, dtype=torch.float32).view(1, 3, 1, 1)
 
         for image_tensors in image_tensors_batch:
             num_tiles_list = []
@@ -265,7 +261,9 @@ class InternVL3Embedder(nn.Module):
                 else:
                     if isinstance(image, torch.Tensor):
                         image = to_pil_image(image.detach().to(device="cpu"))
-                    image_t = TF.to_tensor(image).to(device=self.device, dtype=torch.float32)
+                    image_t = transform_functional.to_tensor(image).to(
+                        device=self.device, dtype=torch.float32
+                    )
                     tiles = self._dynamic_preprocess_tensor(image_t)
                     tile_tensors = (tiles - mean) / std
 
@@ -391,10 +389,7 @@ class InternVL3Embedder(nn.Module):
         return_cls_only: bool = True,
     ):
         is_batched_input = bool(image_tensors) and isinstance(image_tensors[0], list)
-        if is_batched_input:
-            image_tensors_batch = image_tensors
-        else:
-            image_tensors_batch = [image_tensors]
+        image_tensors_batch = image_tensors if is_batched_input else [image_tensors]
 
         batch_size = len(image_tensors_batch)
         if batch_size == 0:
@@ -409,10 +404,7 @@ class InternVL3Embedder(nn.Module):
                     f"InternVL3 batch mismatch: num_text_prompts={len(text_prompts)} num_batches={batch_size}"
                 )
 
-        if image_mask.ndim == 1:
-            image_masks = image_mask.unsqueeze(0)
-        else:
-            image_masks = image_mask
+        image_masks = image_mask.unsqueeze(0) if image_mask.ndim == 1 else image_mask
 
         if image_masks.shape[0] != batch_size:
             raise ValueError(
@@ -421,7 +413,9 @@ class InternVL3Embedder(nn.Module):
 
         for batch_idx, image_list in enumerate(image_tensors_batch):
             if len(image_list) == 0:
-                raise ValueError(f"InternVL3 expects at least one image per batch item, got empty at batch_idx={batch_idx}")
+                raise ValueError(
+                    f"InternVL3 expects at least one image per batch item, got empty at batch_idx={batch_idx}"
+                )
             if int(image_masks.shape[1]) != len(image_list):
                 raise ValueError(
                     "InternVL3 mask/image count mismatch: "
@@ -434,7 +428,9 @@ class InternVL3Embedder(nn.Module):
         if pixel_values.shape[0] == 0:
             logging.warning("InternVL3 received an empty image batch after preprocessing.")
             hidden_size = self.model.language_model.get_input_embeddings().embedding_dim
-            vit_embeds = torch.empty(0, hidden_size, dtype=next(self.model.parameters()).dtype, device=self.device)
+            vit_embeds = torch.empty(
+                0, hidden_size, dtype=next(self.model.parameters()).dtype, device=self.device
+            )
         else:
             vit_embeds = self.model.extract_feature(pixel_values)
 

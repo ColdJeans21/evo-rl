@@ -84,9 +84,7 @@ class EVO1(nn.Module):
             )
 
         if isinstance(prompt, list) and len(prompt) != batch_size:
-            raise ValueError(
-                f"EVO1 batch mismatch: num_prompts={len(prompt)} num_images_batch={batch_size}"
-            )
+            raise ValueError(f"EVO1 batch mismatch: num_prompts={len(prompt)} num_images_batch={batch_size}")
 
         return self.embedder.get_fused_image_text_embedding_from_tensor_images(
             image_tensors=images,
@@ -125,9 +123,13 @@ class EVO1(nn.Module):
         if state is not None and state.shape[0] != batch_size:
             raise ValueError(f"EVO1 batch mismatch: state_batch={state.shape[0]} fused_batch={batch_size}")
         if actions_gt is not None and actions_gt.shape[0] != batch_size:
-            raise ValueError(f"EVO1 batch mismatch: actions_gt_batch={actions_gt.shape[0]} fused_batch={batch_size}")
+            raise ValueError(
+                f"EVO1 batch mismatch: actions_gt_batch={actions_gt.shape[0]} fused_batch={batch_size}"
+            )
         if action_mask is not None and action_mask.shape[0] != batch_size:
-            raise ValueError(f"EVO1 batch mismatch: action_mask_batch={action_mask.shape[0]} fused_batch={batch_size}")
+            raise ValueError(
+                f"EVO1 batch mismatch: action_mask_batch={action_mask.shape[0]} fused_batch={batch_size}"
+            )
 
         if embodiment_ids is not None:
             if embodiment_ids.ndim == 0:
@@ -182,10 +184,10 @@ class EVO1(nn.Module):
             action_mask=action_mask,
             embodiment_ids=embodiment_ids,
         )
-        
+
         if isinstance(action, torch.Tensor) and action.dtype == torch.bfloat16:
             action = action.to(torch.float32)
-            
+
         return action
 
     def forward(

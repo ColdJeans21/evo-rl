@@ -29,7 +29,6 @@ from lerobot.scripts.lerobot_record import _ensure_human_inloop_compatible_featu
 from lerobot.utils.constants import ACTION
 from lerobot.utils.utils import init_logging
 
-
 MISSING_HIL_FEATURES = (
     "complementary_info.policy_action",
     "complementary_info.is_intervention",

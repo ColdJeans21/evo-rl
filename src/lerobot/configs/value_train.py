@@ -149,10 +149,7 @@ class ValueTrainPipelineConfig(HubMixin):
             if self.dataset.episodes is not None:
                 overlap = sorted(set(self.dataset.episodes) & set(self.validation.episodes))
                 if overlap:
-                    raise ValueError(
-                        "Training and validation episodes must be disjoint; "
-                        f"overlap={overlap}."
-                    )
+                    raise ValueError(f"Training and validation episodes must be disjoint; overlap={overlap}.")
 
         if hasattr(self.value, "target_key"):
             self.value.target_key = self.targets.target_field

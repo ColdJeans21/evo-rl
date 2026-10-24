@@ -211,9 +211,8 @@ class SwanLabLogger:
             import swanlab
         except ImportError:
             raise ImportError(
-                "SwanLab is required when SWANLAB_API_KEY is set. "
-                "Install it with: pip install swanlab"
-            )
+                "SwanLab is required when SWANLAB_API_KEY is set. Install it with: pip install swanlab"
+            ) from None
 
         self.cfg = cfg.wandb
         self.log_dir = cfg.output_dir
@@ -242,8 +241,8 @@ class SwanLabLogger:
             run_url = swanlab_data.get_url()
             if run_url:
                 logging.info(f"Track this run --> {colored(run_url, 'yellow', attrs=['bold'])}")
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.debug("Could not resolve the SwanLab run URL: %s", exc)
 
     def log_policy(self, checkpoint_dir: Path):
         return

@@ -11,7 +11,6 @@ from lerobot.utils.rotation import Rotation
 
 from .converters import robot_action_observation_to_transition, transition_to_robot_action
 
-
 MOTOR_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
 
 
@@ -19,7 +18,14 @@ class SpaceMouseToSO101Step(RobotActionProcessorStep):
     def __init__(self, config, robot):
         self.config = config
         self.motor_names = MOTOR_NAMES
-        urdf_path = config.urdf_path or Path(__file__).parent.parent / "teleoperators" / "spacemouse" / "urdfs" / "so101_new_calib.urdf"
+        urdf_path = (
+            config.urdf_path
+            or Path(__file__).parent.parent
+            / "teleoperators"
+            / "spacemouse"
+            / "urdfs"
+            / "so101_new_calib.urdf"
+        )
         self.kinematics = RobotKinematics(
             urdf_path=str(urdf_path),
             target_frame_name="gripper_frame_link",
@@ -35,7 +41,7 @@ class SpaceMouseToSO101Step(RobotActionProcessorStep):
         if self._use_degrees:
             return np.array(values, dtype=float, copy=True)
         degrees = []
-        for value, name in zip(values, self.motor_names[:-1]):
+        for value, name in zip(values, self.motor_names[:-1], strict=True):
             calibration = self._bus.calibration[name]
             motor = self._bus.motors[name]
             resolution = self._bus.model_resolution_table[motor.model] - 1
@@ -50,7 +56,7 @@ class SpaceMouseToSO101Step(RobotActionProcessorStep):
         if self._use_degrees:
             return np.array(values, dtype=float, copy=True)
         normalized = []
-        for value, name in zip(values, self.motor_names[:-1]):
+        for value, name in zip(values, self.motor_names[:-1], strict=True):
             calibration = self._bus.calibration[name]
             motor = self._bus.motors[name]
             resolution = self._bus.model_resolution_table[motor.model] - 1
@@ -77,12 +83,18 @@ class SpaceMouseToSO101Step(RobotActionProcessorStep):
             self._gripper = current[-1]
         enabled = bool(action.get("enabled", False))
         if enabled:
-            delta_position = np.asarray(
-                [float(action.get(f"target_{axis}", 0.0)) for axis in ("x", "y", "z")], dtype=float
-            ) * self.config.translation_step_m
-            delta_rotation = np.asarray(
-                [float(action.get(f"target_w{axis}", 0.0)) for axis in ("x", "y", "z")], dtype=float
-            ) * self.config.rotation_step_rad
+            delta_position = (
+                np.asarray(
+                    [float(action.get(f"target_{axis}", 0.0)) for axis in ("x", "y", "z")], dtype=float
+                )
+                * self.config.translation_step_m
+            )
+            delta_rotation = (
+                np.asarray(
+                    [float(action.get(f"target_w{axis}", 0.0)) for axis in ("x", "y", "z")], dtype=float
+                )
+                * self.config.rotation_step_rad
+            )
             self._target[:3, 3] += delta_position
             self._target[:3, :3] = self._target[:3, :3] @ Rotation.from_rotvec(delta_rotation).as_matrix()
             self._gripper = float(
@@ -102,11 +114,14 @@ class SpaceMouseToSO101Step(RobotActionProcessorStep):
             orientation_weight=self.config.orientation_weight,
         )
         if self.config.max_joint_step_deg > 0:
-            solved = current_degrees + np.clip(solved - current_degrees, -self.config.max_joint_step_deg, self.config.max_joint_step_deg)
+            solved = current_degrees + np.clip(
+                solved - current_degrees, -self.config.max_joint_step_deg, self.config.max_joint_step_deg
+            )
         solved_native = self._degrees_to_native(solved)
-        return {f"{name}.pos": float(value) for name, value in zip(self.motor_names[:-1], solved_native)} | {
-            "gripper.pos": float(self._gripper)
-        }
+        return {
+            f"{name}.pos": float(value)
+            for name, value in zip(self.motor_names[:-1], solved_native, strict=True)
+        } | {"gripper.pos": float(self._gripper)}
 
     def transform_features(self, features):
         return features

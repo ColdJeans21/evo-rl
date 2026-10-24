@@ -172,7 +172,7 @@ def _format_episode_spec(episode_indices: list[int]) -> str:
 
 
 def export_episode_boundary_frames(
-    dataset: "LeRobotDataset",
+    dataset: LeRobotDataset,
     output_dir: Path,
     episode_indices: list[int],
     camera_key: str,
@@ -185,7 +185,11 @@ def export_episode_boundary_frames(
         from_idx = int(episodes["dataset_from_index"][episode_index])
         to_idx = int(episodes["dataset_to_index"][episode_index])
         length = int(episodes["length"][episode_index])
-        success = str(episodes["episode_success"][episode_index]) if "episode_success" in episodes.column_names else ""
+        success = (
+            str(episodes["episode_success"][episode_index])
+            if "episode_success" in episodes.column_names
+            else ""
+        )
 
         first_name = f"episode_{episode_index:0{pad_width}d}_first.png"
         last_name = f"episode_{episode_index:0{pad_width}d}_last.png"

@@ -277,7 +277,9 @@ def init_keyboard_listener(
                     print("Escape key pressed. Stopping data recording...")
                     events["stop_recording"] = True
                     events["exit_early"] = True
-                elif hasattr(key, "char") and key.char and key.char.lower() == intervention_toggle_key.lower():
+                elif (
+                    hasattr(key, "char") and key.char and key.char.lower() == intervention_toggle_key.lower()
+                ):
                     now = time.monotonic()
                     if now - last_intervention_time[0] < INTERVENTION_TOGGLE_COOLDOWN_S:
                         return
@@ -290,7 +292,9 @@ def init_keyboard_listener(
                     and key.char
                     and key.char.lower() == episode_success_key.lower()
                 ):
-                    print(f"'{episode_success_key}' key pressed. Marking episode as success and exiting loop...")
+                    print(
+                        f"'{episode_success_key}' key pressed. Marking episode as success and exiting loop..."
+                    )
                     events["episode_outcome"] = EPISODE_SUCCESS
                     events["exit_early"] = True
                 elif (
@@ -299,7 +303,9 @@ def init_keyboard_listener(
                     and key.char
                     and key.char.lower() == episode_failure_key.lower()
                 ):
-                    print(f"'{episode_failure_key}' key pressed. Marking episode as failure and exiting loop...")
+                    print(
+                        f"'{episode_failure_key}' key pressed. Marking episode as failure and exiting loop..."
+                    )
                     events["episode_outcome"] = EPISODE_FAILURE
                     events["exit_early"] = True
             except Exception as e:

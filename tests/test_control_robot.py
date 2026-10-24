@@ -32,7 +32,10 @@ from lerobot.scripts.lerobot_human_inloop_record import (
     _slow_reset_all_arms_to_pose,
     human_inloop_record,
 )
-from lerobot.scripts.lerobot_patch_hil_dataset_schema import PatchHilDatasetSchemaConfig, patch_hil_dataset_schema
+from lerobot.scripts.lerobot_patch_hil_dataset_schema import (
+    PatchHilDatasetSchemaConfig,
+    patch_hil_dataset_schema,
+)
 from lerobot.scripts.lerobot_record import (
     ACPInferenceConfig,
     DatasetRecordConfig,
@@ -242,7 +245,10 @@ def test_patch_hil_dataset_schema_restores_legacy_dataset_mergeability(tmp_path)
         output_repo_id="dummy/repo_merged",
         output_dir=merged_root,
     )
-    assert merged_dataset.meta.total_episodes == current_dataset.meta.total_episodes + patched_dataset.meta.total_episodes
+    assert (
+        merged_dataset.meta.total_episodes
+        == current_dataset.meta.total_episodes + patched_dataset.meta.total_episodes
+    )
 
 
 def test_record_loop_sets_leader_manual_control_during_reset():

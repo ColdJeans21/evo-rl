@@ -578,14 +578,14 @@ The dataset is designed to support offline RL, value learning, advantage-conditi
 - Email: business@evomind-tech.com
 - Get into WeChat group by scanning QR code:
 
- <!-- 
+ <!--
 <p align="center">
   <img alt="EvoMind WeChat QR" src="./website/assets/images/rlgroup.jpg" width="220"/>
   <!-- <img alt="EvoMind WeChat QR" src="./website/assets/images/WZJHOfficial.png" width="220"/> -->
 </p>
  -->
 
-- Get into WeChat Group or get So101 Supplier, please contact the following  WeChat, 加群（注明加真机强化学习群）/So101 设备提供商:
+- Get into WeChat Group or get So101 Supplier, please contact the following WeChat, 加群（注明加真机强化学习群）/So101 设备提供商:
 <p align="center">
   <img alt="So101 Supplier" src="./website/assets/images/so101provider.jpg" width="220"/>
 </p>

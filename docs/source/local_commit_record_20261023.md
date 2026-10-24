@@ -3,12 +3,12 @@
 本次在 `main` 分支整理现有改动，并完成 Value 训练数据准备。对应可恢复标签：
 `value-data-ready-20261023`。标签指向本记录和训练准备代码所在的提交。
 
-| 提交/标签 | 提交名称 | 内容 |
-| --- | --- | --- |
-| `4891bc5` | `fix(processor): load checkpoints with unavailable disabled steps` | 兼容检查点中显式关闭且本机不可用的处理器步骤，并补充测试。 |
-| `19e9c28` | `feat(recording): add RTC rollout and numbered SO101 collection` | RTC 异步分块、人工接管时清队列、配置检查、使用文档和 selfRoll 编号递增脚本。 |
-| `b7b88fa` | `feat(training): log CUDA memory usage` | policy 训练时记录当前/峰值 allocated、reserved 显存，并写入训练指标。 |
-| `value-data-ready-20261023` | `feat(data): prepare success_valueModelTrain and value training recipe` | 成功数据集构建校验脚本、batch 32 训练入口、参数及数据准备记录。 |
+| 提交/标签                   | 提交名称                                                                | 内容                                                                         |
+| --------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `4891bc5`                   | `fix(processor): load checkpoints with unavailable disabled steps`      | 兼容检查点中显式关闭且本机不可用的处理器步骤，并补充测试。                   |
+| `19e9c28`                   | `feat(recording): add RTC rollout and numbered SO101 collection`        | RTC 异步分块、人工接管时清队列、配置检查、使用文档和 selfRoll 编号递增脚本。 |
+| `b7b88fa`                   | `feat(training): log CUDA memory usage`                                 | policy 训练时记录当前/峰值 allocated、reserved 显存，并写入训练指标。        |
+| `value-data-ready-20261023` | `feat(data): prepare success_valueModelTrain and value training recipe` | 成功数据集构建校验脚本、batch 32 训练入口、参数及数据准备记录。              |
 
 查看标签对应的确切提交：
 

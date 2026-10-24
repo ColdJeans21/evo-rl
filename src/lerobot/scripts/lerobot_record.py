@@ -126,7 +126,6 @@ from lerobot.teleoperators import (  # noqa: F401
 from lerobot.utils.constants import ACTION
 from lerobot.utils.control_utils import (
     init_keyboard_listener,
-    is_headless,
     sanity_check_bimanual_piper_pair,
     sanity_check_dataset_name,
     sanity_check_dataset_robot_compatibility,
@@ -292,10 +291,7 @@ class RecordConfig:
             raise ValueError("`acp_inference.use_cfg=true` requires `acp_inference.enable=true`.")
         if self.acp_inference.cfg_beta < 0:
             raise ValueError("`acp_inference.cfg_beta` must be >= 0.")
-        if (
-            self.policy is not None
-            and self.policy.type in RTCPolicyActionProvider.SUPPORTED_POLICY_NAMES
-        ):
+        if self.policy is not None and self.policy.type in RTCPolicyActionProvider.SUPPORTED_POLICY_NAMES:
             # RTC is a recording-time option. Override any value serialized in the
             # checkpoint so the top-level `--rtc.*` flags remain authoritative.
             self.policy.rtc_config = self.rtc
@@ -311,14 +307,10 @@ class RecordConfig:
                 raise ValueError("`rtc.execution_horizon` must be positive.")
             if self.rtc_action_queue_size_to_get_new_actions <= self.rtc.execution_horizon:
                 raise ValueError(
-                    "`rtc_action_queue_size_to_get_new_actions` must be greater than "
-                    "`rtc.execution_horizon`."
+                    "`rtc_action_queue_size_to_get_new_actions` must be greater than `rtc.execution_horizon`."
                 )
             chunk_size = getattr(self.policy, "chunk_size", None)
-            if (
-                chunk_size is not None
-                and self.rtc_action_queue_size_to_get_new_actions >= chunk_size
-            ):
+            if chunk_size is not None and self.rtc_action_queue_size_to_get_new_actions >= chunk_size:
                 raise ValueError(
                     "`rtc_action_queue_size_to_get_new_actions` must be smaller than "
                     f"`policy.chunk_size` ({self.rtc_action_queue_size_to_get_new_actions} >= {chunk_size})."
@@ -603,8 +595,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         if dataset:
             dataset.finalize()
             logging.info(
-                "To inspect the recorded dataset, run:\n"
-                "  lerobot-dataset-report --dataset %s",
+                "To inspect the recorded dataset, run:\n  lerobot-dataset-report --dataset %s",
                 dataset.repo_id,
             )
 

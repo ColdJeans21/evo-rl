@@ -71,8 +71,7 @@ class RTCPolicyActionProvider:
             raise ValueError(f"RTC recording supports policies [{supported}], got {policy.name!r}.")
         if action_queue_size_to_get_new_actions <= rtc_config.execution_horizon:
             raise ValueError(
-                "`rtc_action_queue_size_to_get_new_actions` must be greater than "
-                "`rtc.execution_horizon`."
+                "`rtc_action_queue_size_to_get_new_actions` must be greater than `rtc.execution_horizon`."
             )
         if action_timeout_s <= 0:
             raise ValueError("`rtc_action_timeout_s` must be positive.")

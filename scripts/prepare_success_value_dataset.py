@@ -25,6 +25,14 @@ from lerobot.values.rewards import build_successful_value_targets
 INTERVENTION = "complementary_info.is_intervention"
 
 
+def episode_video_path(dataset_root: Path, episode: dict, camera: str) -> Path:
+    return dataset_root / DEFAULT_VIDEO_PATH.format(
+        video_key=camera,
+        chunk_index=episode[f"videos/{camera}/chunk_index"],
+        file_index=episode[f"videos/{camera}/file_index"],
+    )
+
+
 def read_parquets(root: Path, subdir: str) -> pa.Table:
     files = sorted((root / subdir).rglob("*.parquet"))
     if not files:
@@ -130,7 +138,7 @@ def main() -> None:
     destination = parent / args.output_name
     if destination.exists():
         raise FileExistsError(f"Refusing to overwrite {destination}")
-    if not 1 <= args.max_rollout:
+    if not args.max_rollout >= 1:
         raise ValueError("--max-rollout must be positive")
 
     relabels = confirm_success(parent, sorted(set(args.confirm_success)))
@@ -192,15 +200,8 @@ def main() -> None:
             if target_episode["tasks"] != source_episode["tasks"]:
                 raise ValueError("Episode tasks changed")
             for camera in camera_keys:
-                def video_path(dataset_root, episode):
-                    return dataset_root / DEFAULT_VIDEO_PATH.format(
-                        video_key=camera,
-                        chunk_index=episode[f"videos/{camera}/chunk_index"],
-                        file_index=episode[f"videos/{camera}/file_index"],
-                    )
-
-                source_video = video_path(root, source_episode)
-                target_video = video_path(staging, target_episode)
+                source_video = episode_video_path(root, source_episode, camera)
+                target_video = episode_video_path(staging, target_episode, camera)
                 key = str(target_video.relative_to(staging))
                 if key not in video_hashes:
                     video_hashes[key] = digest(target_video)
@@ -212,16 +213,18 @@ def main() -> None:
                         raise ValueError(f"Video timestamp changed: {source_video}")
             frame_slice = data.slice(source_episode["dataset_from_index"], source_episode["length"])
             human = frame_slice[INTERVENTION].to_numpy().astype(bool)
-            episodes.append({
-                "episode_index": target_id,
-                "source_root": str(root),
-                "source_episode_index": source_id,
-                "source_type": "demonstration" if root.name == args.demo_name else "rollout",
-                "episode_success": "success",
-                "frames": source_episode["length"],
-                "human_flag_frames": int(human.sum()),
-                "takeover_events": int(np.sum(~human[:-2] & human[1:-1])),
-            })
+            episodes.append(
+                {
+                    "episode_index": target_id,
+                    "source_root": str(root),
+                    "source_episode_index": source_id,
+                    "source_type": "demonstration" if root.name == args.demo_name else "rollout",
+                    "episode_success": "success",
+                    "frames": source_episode["length"],
+                    "human_flag_frames": int(human.sum()),
+                    "takeover_events": int(np.sum(~human[:-2] & human[1:-1])),
+                }
+            )
         frame_offset += len(data)
         episode_offset += len(meta)
     if (frame_offset, episode_offset) != (len(merged_data), len(merged_meta)):

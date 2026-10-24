@@ -262,7 +262,11 @@ class FlowmatchingActionHead(nn.Module):
             context_tokens = torch.cat([context_tokens, state_emb], dim=1)
 
         t = (
-            torch.distributions.Beta(2, 2).sample((batch_size,)).clamp(0.02, 0.98).to(device).to(dtype=self.dtype)
+            torch.distributions.Beta(2, 2)
+            .sample((batch_size,))
+            .clamp(0.02, 0.98)
+            .to(device)
+            .to(dtype=self.dtype)
         )
 
         time_index = (t * 1000).long()
@@ -293,7 +297,9 @@ class FlowmatchingActionHead(nn.Module):
             action_tokens = self.action_encoder(action_intermediate_seq, embodiment_id)
         else:
             if self.single_action_proj is None:
-                raise RuntimeError("single_action_proj is not initialized for single-step inference/training.")
+                raise RuntimeError(
+                    "single_action_proj is not initialized for single-step inference/training."
+                )
             action_tokens = self.single_action_proj(action_intermediate_seq)
 
         x = action_tokens
@@ -360,7 +366,9 @@ class FlowmatchingActionHead(nn.Module):
         dt = 1.0 / num_steps
         t_vals = torch.arange(num_steps, device=device, dtype=torch.float32) / num_steps
         time_indices = (t_vals * 1000).long()
-        all_time_embs = self.time_pos_enc(1000)[0, time_indices, :].to(device=device, dtype=context_tokens.dtype)
+        all_time_embs = self.time_pos_enc(1000)[0, time_indices, :].to(
+            device=device, dtype=context_tokens.dtype
+        )
 
         for i in range(num_steps):
             time_emb = all_time_embs[i].unsqueeze(0).expand(batch_size, -1)
@@ -369,7 +377,9 @@ class FlowmatchingActionHead(nn.Module):
                 action_tokens = self.action_encoder(action_seq, embodiment_id)
             else:
                 if self.single_action_proj is None:
-                    raise RuntimeError("single_action_proj is not initialized for single-step inference/training.")
+                    raise RuntimeError(
+                        "single_action_proj is not initialized for single-step inference/training."
+                    )
                 action_tokens = self.single_action_proj(action_seq)
 
             x = action_tokens

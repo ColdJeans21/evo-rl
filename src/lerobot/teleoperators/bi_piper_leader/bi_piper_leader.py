@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import multiprocessing as mp
 import traceback
 from contextlib import suppress
@@ -60,8 +61,8 @@ def _bi_piper_leader_worker(conn, arm_cls, arm_config) -> None:
         try:
             if arm.is_connected:
                 arm.disconnect()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logging.debug("Failed to disconnect bi-piper leader during worker shutdown: %s", exc)
         conn.close()
 
 
@@ -108,8 +109,7 @@ class _PiperLeaderProcessProxy:
         if response["ok"]:
             return response.get("result")
         raise RuntimeError(
-            f"bi_piper leader worker command '{command}' failed: {response['error']}\n"
-            f"{response['traceback']}"
+            f"bi_piper leader worker command '{command}' failed: {response['error']}\n{response['traceback']}"
         )
 
     def connect(self) -> None:
