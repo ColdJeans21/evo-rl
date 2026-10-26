@@ -37,6 +37,7 @@ from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.rl.acp_dataset_stats import compute_acp_indicator_stats
 from lerobot.rl.acp_hook import build_acp_raw_batch_hook
+from lerobot.rl.evo_selection import make_evo_selection_dataset_and_sampler
 from lerobot.rl.wandb_utils import make_logger
 from lerobot.scripts.lerobot_eval import eval_policy_all
 from lerobot.utils.import_utils import register_third_party_plugins
@@ -349,6 +350,16 @@ def train(
     if cfg.resume:
         step, optimizer, lr_scheduler = load_training_state(cfg.checkpoint_path, optimizer, lr_scheduler)
 
+    evo_selection_sampler = None
+    if cfg.evo_selection.enable:
+        dataset, evo_selection_sampler, selection_summary = make_evo_selection_dataset_and_sampler(
+            dataset=dataset,
+            cfg=cfg.evo_selection,
+            seed=cfg.seed,
+        )
+        if is_main_process:
+            logging.info("Evo-RL paper-style selection:\n%s", pformat(selection_summary))
+
     num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     num_total_params = sum(p.numel() for p in policy.parameters())
 
@@ -370,7 +381,10 @@ def train(
         logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
     # create dataloader for offline training
-    if hasattr(cfg.policy, "drop_n_last_frames"):
+    if evo_selection_sampler is not None:
+        shuffle = False
+        sampler = evo_selection_sampler
+    elif hasattr(cfg.policy, "drop_n_last_frames"):
         shuffle = False
         sampler = EpisodeAwareSampler(
             dataset.meta.episodes["dataset_from_index"],

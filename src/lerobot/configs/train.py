@@ -41,6 +41,37 @@ class ACPConfig:
 
 
 @dataclass
+class EvoRLSelectionConfig:
+    """Paper-style source mixing for Evo-RL policy refinement."""
+
+    enable: bool = False
+    plan_path: str | None = None
+    samples_per_epoch: int = 0
+    demo_base_weight: float = 0.50
+    intervention_weight: float = 0.25
+    demo_selected_weight: float = 0.125
+    auto_selected_weight: float = 0.125
+
+    def validate(self) -> None:
+        if not self.enable:
+            return
+        if not self.plan_path:
+            raise ValueError("'evo_selection.plan_path' is required when selection is enabled.")
+        if self.samples_per_epoch < 0:
+            raise ValueError("'evo_selection.samples_per_epoch' must be >= 0.")
+        weights = {
+            "demo_base_weight": self.demo_base_weight,
+            "intervention_weight": self.intervention_weight,
+            "demo_selected_weight": self.demo_selected_weight,
+            "auto_selected_weight": self.auto_selected_weight,
+        }
+        if any(value <= 0.0 for value in weights.values()):
+            raise ValueError(f"All Evo-RL source weights must be > 0, got {weights}.")
+        if abs(sum(weights.values()) - 1.0) > 1e-6:
+            raise ValueError(f"Evo-RL source weights must sum to 1, got {weights}.")
+
+
+@dataclass
 class TrainPipelineConfig(HubMixin):
     dataset: DatasetConfig
     env: envs.EnvConfig | None = None
@@ -74,6 +105,7 @@ class TrainPipelineConfig(HubMixin):
     wandb: WandBConfig = field(default_factory=WandBConfig)
     peft: PeftConfig | None = None
     acp: ACPConfig = field(default_factory=ACPConfig)
+    evo_selection: EvoRLSelectionConfig = field(default_factory=EvoRLSelectionConfig)
 
     # RA-BC (Reward-Aligned Behavior Cloning) parameters
     use_rabc: bool = False  # Enable reward-weighted training
@@ -152,6 +184,11 @@ class TrainPipelineConfig(HubMixin):
             raise ValueError("'acp.indicator_dropout_prob' must be within [0, 1].")
         if self.acp.enable and not self.acp.indicator_field:
             raise ValueError("'acp.indicator_field' must be set when 'acp.enable=true'.")
+        self.evo_selection.validate()
+        if self.acp.enable and self.evo_selection.enable:
+            raise ValueError(
+                "ACP prompt conditioning and paper-style Evo-RL selection are mutually exclusive."
+            )
 
         if self.use_rabc and not self.rabc_progress_path:
             # Auto-detect from dataset path
